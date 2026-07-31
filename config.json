@@ -1,0 +1,131 @@
+{
+    "Language": {
+        "day_trade": {
+            "Application": {
+                "day_trade": {
+                    "Language_details": {
+                        "extension": [".java"],
+                        "user_defined_generic_import": "com.",
+                        "user_defined_import": "com.tcs",
+                        "static_user_defined_import": "static com.tcs",
+                        "IMPORTS_SHEET": "ImportsMapping",
+                        "AST_SHEET": "Cleaned_AST_Details",
+                        "CONTROLLER_ANNOTATION": "@RequestMapping",
+                        
+                        "PROJECT_PATH": "C:\\Users\\Barath\\Downloads\\sample.daytrader7-master_new",
+                        "UI_PROJECT_PATH": "C:\\Users\\Barath\\Downloads\\sample.daytrader7-master_new",
+                        "SERVICE_PROJECT_PATH": "C:\\Users\\Barath\\Downloads\\sample.daytrader7-master_new",
+                        "STANDARD_NAME_CONFIG_PATH": "C:\\Project\\Reverse_Engineering_framework\\end_to_end_framework\\Input\\standard_names_config.yaml",
+                        "IMPORTS_FILE_JSON": "imports_for_file_lineage.json",
+
+                        "system_prefixes": ["java.", "javax.", "org.springframework.", "org.hibernate.", "org.apache.", "com.fasterxml."],
+                        "valid_extensions": [".java", ".ts", ".html", ".css", ".scss", ".yml", ".json", ".properties", ".xml", ".md"],
+                        "STANDARD_TYPES": ["String", "Long", "Boolean", "Integer", "Optional", "Map", "List", "Page", "Pageable", "BigDecimal", "Character", "Double", "Float", "Short", "Byte", "ZonedDateTime", "JsonNode", "Set", "HashMap", "ArrayList", "LinkedList", "Queue", "Deque", "Object", "Exception", "Class", "Collection", "StringBuilder", "ObjectMapper", "Path", "HttpHeaders"],
+                        "DVT_FILES": ["SearchException", "SearchQueryResponse", "IndexCreationDTO","IndexSearchDTO","IndexMultiSearchDTO", "VectorCreationDTO","LuceneService", "SearchIndexMetadata", "VectorService", "VectorSearchDTO", "TextCatInferModel", "TextCatInferRequest", "TextCatInferResponse","TextCatTrainRequest", "TextCatException", "TextCatService", "TextCatInferByFileResponse", "TextCatTrainResponse", "SearchMultiQueryResponse"],
+                        "SYSTEM_PACKAGES": ["org.", "java.", "javax.", "spring."],
+                        "UI_keywords": ["@Component", "@NgModule", "@Injectable", "@Directive", "@Pipe", "selector", "templateUrl", "styleUrls", "standalone", "bootstrap", "declarations", "imports", "exports", "providers", "ngOnInit", "ngOnDestroy", "ngAfterViewInit", "ngAfterContentInit", "ngAfterContentChecked", "ngAfterViewChecked", "ngDoCheck", "RouterModule", "Routes", "Router", "ActivatedRoute", "navigate", "routerLink", "routerLinkActive", "router-outlet", "CanActivate", "CanDeactivate", "Resolve", "CanLoad", "RouterStateSnapshot", "NavigationEnd", "ActivatedRouteSnapshot", "FormGroup", "FormControl", "FormArray", "FormBuilder", "Validators", "AsyncValidatorFn", "ngModel", "formGroup", "formControlName", "AbstractControl", "Observable", "Subject", "BehaviorSubject", "ReplaySubject", "subscribe", "pipe", "map", "filter", "tap", "switchMap", "mergeMap", "concatMap", "exhaustMap", "catchError", "debounceTime", "distinctUntilChanged", "takeUntil", "retry", "throwError", "of", "from", "HttpClient", "HttpHeaders", "HttpParams", "HttpInterceptor", "ChangeDetectorRef", "detectChanges", "NgZone", "zone", "ChangeDetectionStrategy", "OnPush", "trackBy", "ComponentFixture", "TestBed", "beforeEach", "afterEach", "beforeAll", "it", "expect", "fakeAsync", "tick", "async", "spyOn", "angular.json", "tsconfig.json", "tsconfig.app.json", "tsconfig.spec.json", "karma.conf.js", "polyfills.ts", "main.ts", "environment.ts", "environment.prod.ts", "package.json", "BrowserModule", "CommonModule", "ReactiveFormsModule", "FormsModule", "app", "assets", "components", "services", "pipes", "directives", "models", "environments", "i18n", "aria-", "Lazy Loading", "PreloadingStrategy"],
+                        "Service_keywords": ["abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class", "const*", "continue", "default", "do", "double", "else", "enum", "extends", "final", "finally", "float", "for", "goto*", "if", "implements", "import", "instanceof", "int", "interface", "long", "native", "new", "package", "private", "protected", "public", "return", "short", "static", "strictfp", "super", "switch", "synchronized", "this","throw", "throws", "transient", "try", "void", "volatile", "while", "var", "record†", "yield†", "ApplicationContext", "SpringApplication", "ConfigurableApplicationContext", "DispatcherServlet", "BeanFactory", "BeanDefinition", "BeanProcessor", "HandlerMethod", "RequestMappingHandlerAdapter", "Controller", "RestController", "ProxyFactory", "Advisor", "Advice", "BeanPostProcessor", "JdbcTemplate", "NamedParameterJdbcTemplate", "EntityManager", "JpaRepository", "KafkaTemplate", "RabbitTemplate", "JmsTemplate", "Endpoint", "HealthIndicator", "MetricsEndpoint","ApplicationContextRunner", "TestRestTemplate", "MockMvc"],
+                        "control_keywords" : ["if","for","while","switch","catch","new","return","synchronized","this","super","assert","equals"],
+                        "SYSTEM_METHODS": [
+                            "length","size","isempty","isPresent","value","catch","equals","equalsignorecase","hashcode","toString","getMessage",
+                            "tolowercase","touppercase","trim","split","substring","replace","replaceall","return","StringBuffer","setString","getString",
+                            "contains","containsAll","charat","toarray","compareto","entryset","allmatch","append","indexOf",
+                            "removeall","body","exists","isdirectory","tofile","contentlength","parseInt","printStackTrace","parseLong",
+                            "savefilecontent","createnewdirectory","anymatch","detect","close","endtext","getTime",
+                            "save","findfirst","data","isspecialcharacter","showtext","channel","handle","BigDecimal","delete",
+                            "delay","enrichheaders","copyheaders","and","denyall","permitall","httpbasic","getTime","URL",
+                            "frameoption","add","remove","put","get","clear","computeifabsent","containskey",
+                            "containsvalue","count","distinct","stream","map","flatmap","filter","collect",
+                            "foreach","orelse","orelseget","debug","info","warn","error","trace","build",
+                            "headers","csrf","authorizehttprequests","requestmatchers","sessionmanagement",
+                            "abs","max","min","round","ceil","floor","rint","pow","sqrt","cbrt","exp","expm1","log","random"
+                        ],
+                        
+                        "DEFAULT_TECH_CONFIG": {
+                            "language": "generic",
+                            "layers": {
+                                "controller": {"patterns": ["*controller.java", "**/controller/**", "*.controller.ts"]},
+                                "service": {"patterns": ["*service.java", "*service.ts", "**/service/**"]},
+                                "repository": {"patterns": ["*repository.java", "**/repository/**"]},
+                                "entity": {"patterns": ["*entity.java", "**/model/**", "**/entity/**"]},
+                                "configuration": {
+                                    "patterns": [
+                                        "application.properties", "application.yml", "*config.java",
+                                        "angular.json", "package.json", "tsconfig.json"
+                                    ]
+                                },
+                                "build": {"patterns": ["pom.xml", "build.gradle", "package-lock.json"]},
+                                "utility": {"patterns": ["*util.java", "*helper.java"]},
+                                "dto": {"patterns": ["*dto.java"]},
+                                "rule": {"patterns": ["*rule.java"]}
+                            }
+                        },
+                        "INSERT_SEPARATOR_ROWS": false
+                    },
+
+                    "Regex_Pattern": {
+                        "method": "(public|private|protected)\\s+[\\w<&gt;]+\\s+\\w+\\s*\\(([^)]*)\\)",
+                        "method_with_throw": "\\b(public|protected|private)\\s+[\\w<>,\\s]+\\s+\\w+\\s*\\((.*?)\\)\\s*(?:throws\\s+[^\\{]+)?\\s*\\{",
+                        "param_decl": "(?:@\\w+(?:\\([^)]*\\))?\\s+)*([A-Z][A-Za-z0-9_]*)\\s+\\w+",
+                        "imports": "^\\s*import\\s+([\\w\\.]+)\\s*;\\s*$",
+                        "interface": "public\\s+interface\\s+([A-Z]\\w*)",
+                        "extends": "(extends|implements)\\s+([\\w<&gt;,\\s]+)",
+                        "autowired": "@Autowired\\s+(?:private|protected|public)?\\s*([A-Z]\\w*)",
+                        "value": "@Value\\s*\\(\\s*\"([^\"]+)\"\\s*\\)",
+                        "param_class": "\\b([A-Z]\\w*)\\b",
+                        "catch": "catch\\s*\\(\\s*([A-Z][A-Za-z0-9_]*)\\s+[a-zA-Z_][a-zA-Z0-9_]*\\s*\\)",
+                        "new": "\\b([A-Z][A-Za-z0-9_]*)\\s+[a-zA-Z_][A-Za-z0-9_]*\\s*=\\s*new\\s+([A-Z][A-Za-z0-9_]*)\\s*\\(",
+                        "throw_new": "throw\\s+new\\s+([A-Z][A-Za-z0-9_]*)",
+                        "throws_pattern": "\\bthrows\\s+([A-Z][A-Za-z0-9_,\\s]+)",
+                        "return_type": "(public|private|protected)\\s+([\\w<>]+)\\s+\\w+\\s*\\(",
+                        "return_declaration": "^\\s*(?:public|protected|private)?\\s*(?:static\\s+)?([A-Z][A-Za-z0-9_]*)\\s+\\w+\\s*\\(",
+                        "field_declaration": "\\b(?:private|protected|public)\\s+([A-Z][A-Za-z0-9_<>?,\\s]+)\\s+[a-zA-Z0-9_]+\\s*;",
+                        "class_name": "public\\s+(class|interface)\\s+([A-Z]\\w*)",
+                        "package": "^\\s*package\\s+([A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)*)\\s*;",
+                        "import_static": "^\\s*import\\s+(?:static\\s+)?(com\\.[\\w\\.\\*]+)\\s*;",
+                        "static_import": "import\\s+static\\s+([\\w\\.]+)(?:\\.\\*|\\.([\\w]+))?;",
+                        "autowired_field": "@(?:Autowired|Inject)\\s*(?:\\r?\\n\\s*)*(?:private|protected|public)?\\s*(?:final\\s*)?([A-Za-z_][\\w&amp;lt;&amp;gt;\\.\\[\\]]+)\\s+([A-Za-z_]\\w+)\\s*[;=]?",
+                        "variable_declaration": "\\b([A-Z][A-Za-z0-9_]*(?:\\s*&lt;[^&gt;]+&gt;)?(?:\\[\\])?)\\s+([a-z_][A-Za-z0-9_]*)\\s*(?==|;|,|\\))",                   
+                        "re_var_decl": "\\b([A-Za-z_][\\w&lt;&gt;\\.\\[\\], ?]+)\\s+([A-Za-z_]\\w+)\\s*(?==|;|,|\\))",
+                        "re_var_new": "\\b([A-Za-z_]\\w+)\\s*=\\s*new\\s+([A-Za-z_][\\w\\.]+)\\s*\\(",
+                        "re_simple_call": "\\b(?!return\\b|this\\b|super\\b|new\\b)([A-Za-z_]\\w*)\\s*\\.\\s*([A-Za-z_]\\w*)\\s*\\(",
+                        "re_member_access": "\\b(?!return\\b|this\\b|super\\b|new\\b)([A-Za-z_]\\w*)\\s*\\.\\s*([A-Za-z_]\\w+)\\b",
+                        "re_unqualified_call": "(?<!\\.)\\b([A-Za-z_]\\w*)\\s*\\(",
+                        "re_chain": "\\b(?!return\\b|this\\b|super\\b|new\\b)([A-Za-z_]\\w*)((?:\\.[A-Za-z_]\\w*\\s*\\([^)]*\\))+)",
+                        "class_implements": "\\bclass\\s+([A-Za-z_]\\w*)\\s+implements\\b",
+                        "class_declaration": "\\bclass\\s+([A-Za-z_]\\w*)\\b",
+                        "interface_declaration": "\\binterface\\s+([A-Za-z_]\\w*)\\b",
+                        "method_call": "\\.([A-Za-z_]\\w*)\\s*\\(",
+                        "var_decl_pattern": "(?:private|protected|public|final|static)?\\s*([\\w&lt;&gt;]+)\\s+(\\w+)\\s*(?:=|;)",
+                        "for_loop_pattern": "for\\s*\\(\\s*(?:final\\s+)?([\\w&lt;&gt;]+)\\s+(\\w+)\\s*[:].*?\\)",
+                        "method_pattern": "(?:public|private|protected|\\s)*(?:static\\s+)?[&lt;&gt;\\w\\[\\],\\s]+\\s+METHOD_NAME\\s*\\([^)]*\\)\\s*\\{",
+                        "dot_segment_pat": "\\.\\s*([A-Za-z_]\\w*)\\s*\\(",
+                        "fallback_unqualified_call": "(?<!\\.)\\b([A-Za-z_]\\w*)\\s*\\(",
+                        "fallback_qualified_call": "\\b(?!return\\b|this\\b|super\\b|new\\b)[A-Za-z_]\\w*\\s*\\.\\s*[A-Za-z_]\\w*\\s*\\(",
+                        "method_param_decl": "(?:@\\w+(?:\\([^)]*\\))?\\s+)*(?:final\\s+)?([A-Za-z_]\\w*(?:\\s*&lt;[^&gt;]+&gt;)?(?:\\[\\])?)\\s+([A-Za-z_]\\w*)"
+                    }
+  
+                }
+            },
+            "Prompt_path":{
+                "java_functional_prompt": "C:\\Users\\Barath\\Desktop\\Reverse_Engineering_rabobank\\java_functional_prompt.yaml"
+            }
+        }
+    },
+    "OUTPUT_PATHS": {
+        "ALL_METHODS": "Methods_Used.xlsx",
+        "METHOD_LINEAGE_EXCEL_FILE":"007_Method_Metadata.xlsx",
+        "METHOD_FLOW_OCCURRENCE_DISTRIBUTION": "007.2_Method_Detailed_Flow_Occurrence_Distribution.xlsx",
+        "METHOD_ANALYSIS_REPORT": "007.3_Validation_Method_Coverage_Analysis_Report.xlsx",
+    
+        "PARAGRAPH_LINEAGE_EXCEL_FILE": "007_Paragraph_Metadata_Lineage.xlsx",
+        "PARAGRAPH_FLOW_OCCURRENCE_DISTRIBUTION": "007.1_Paragraph_Detailed_Flow_Occurrence_Distribution.xlsx",
+        "PARAGRAPH_ANALYSIS_REPORT": "007.2_Validation_Paragraph_Coverage_Analysis_Report",
+        "DEMERGED_FLOW": "007.1_Demerged_Filled.xlsx",
+        "LLM_CHUNK_EXCEL": "LLM_calls.xlsx",
+        "chunk_vs_spec": "Chunk_VS_Spec_coverage.xlsx",
+        "recursive_chunk_vs_spec_line_number_validation": "recursive_chunk_vs_spec_line_number_validation.xlsx",
+        "traceability_matrix": "traceability_matrix.xlsx",
+        "missing_lines_coverage_report": "missing_lines_coverage_report.xlsx"
+    }
+}

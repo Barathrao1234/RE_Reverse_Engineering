@@ -758,8 +758,22 @@ def generate_method_level_hierarchy(
     METHOD_FLOW_OCCURRENCE_DISTRIBUTION_EXCEL = filter_zero_line_cells(
         METHOD_FLOW_OCCURRENCE_DISTRIBUTION_EXCEL
     )
+    def add_occurrences_to_xlsx(details, OUTPUT_DIR, FILE_DETAILED_FLOW,extension, sheet, substring=False):
+        """
+        Reads flow sheet and appends 'File_Occurrences' sheet with distribution per Level.
+        """
+        FILE_OCCURRENCE = os.path.join(OUTPUT_DIR, FILE_DETAILED_FLOW)
+        df_levels = pd.read_excel(FILE_OCCURRENCE, sheet_name=sheet, engine="openpyxl")
+    
+        file_names = get_all_unique_file_names_from_df(df_levels, details,extension)
+        occ_df = compute_occurrences_from_df(details, df_levels, file_names,extension, substring=substring)
+    
+        with pd.ExcelWriter(FILE_OCCURRENCE, engine="openpyxl", mode="a") as writer:
+            occ_df.to_excel(writer, sheet_name="File_Occurrences", index=False)
 
-    return METHOD_FLOW_OCCURRENCE_DISTRIBUTION_EXCEL
+    add_occurrences_to_xlsx(details,OUTPUT_PATH, results["METHOD_FLOW_OCCURRENCE_DISTRIBUTION"],details["extension"],sheet = "Original Flow" ,substring=False)
+        
+
 
     return METHOD_FLOW_OCCURRENCE_DISTRIBUTION_EXCEL
 

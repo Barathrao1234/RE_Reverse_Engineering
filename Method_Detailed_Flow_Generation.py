@@ -758,6 +758,21 @@ def generate_method_level_hierarchy(
     METHOD_FLOW_OCCURRENCE_DISTRIBUTION_EXCEL = filter_zero_line_cells(
         METHOD_FLOW_OCCURRENCE_DISTRIBUTION_EXCEL
     )
+
+    def get_all_unique_file_names_from_df(df_levels, details,extension):
+        vals = pd.unique(df_levels.values.ravel("K"))
+    
+        cleaned = []
+        for v in vals:
+            if v is None:
+                continue
+            s = str(v).strip()
+            if s == "" or s.lower() in ("none", "nan", "na"):
+                continue
+            cleaned.append(clean_excel_label(s, details,extension))
+        # print("CLEANED : ",cleaned)
+        return cleaned
+
     def add_occurrences_to_xlsx(details, OUTPUT_DIR, FILE_DETAILED_FLOW,extension, sheet, substring=False):
         """
         Reads flow sheet and appends 'File_Occurrences' sheet with distribution per Level.

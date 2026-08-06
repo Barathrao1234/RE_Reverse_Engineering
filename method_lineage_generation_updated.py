@@ -496,26 +496,30 @@ def method_lineage(
                 ast_results.append(_row)
 
         # ---- Optional chain resolution ----
+    # Build an inverted index: method_name → (type, calls) for O(1) lookup
+    # instead of scanning all types on every resolve_chain call (was O(N²)).
+    _method_to_type = {}  # method_name → first type that owns it
+    for _typ, _methods in method_map.items():
+        for _mname in _methods:
+            _method_to_type.setdefault(_mname, _typ)
+
     chain_results = []
 
     def resolve_chain(current, visited):
         called_method = current.split('.')[-1] if '.' in current else current
-        found = False
-        for typ in method_map:
-            if called_method in method_map[typ]:
-                calls = method_map[typ][called_method]
-                file_name = file_map.get(typ, 'Unknown')
-                if calls:
-                    for call in calls:
-                        chain_results.append({'File Name': file_name, 'Method Name': current, 'Object Call': call})
-                        if call not in visited:
-                            visited.add(call)
-                            resolve_chain(call, visited)
-                else:
-                    chain_results.append({'File Name': file_name, 'Method Name': current, 'Object Call': ''})
-                found = True
-                break
-        if not found:
+        typ = _method_to_type.get(called_method)
+        if typ is not None:
+            calls = method_map[typ].get(called_method)
+            file_name = file_map.get(typ, 'Unknown')
+            if calls:
+                for call in calls:
+                    chain_results.append({'File Name': file_name, 'Method Name': current, 'Object Call': call})
+                    if call not in visited:
+                        visited.add(call)
+                        resolve_chain(call, visited)
+            else:
+                chain_results.append({'File Name': file_name, 'Method Name': current, 'Object Call': ''})
+        else:
             chain_results.append({'File Name': 'Unknown', 'Method Name': current, 'Object Call': ''})
 
     for typ in method_map:
@@ -671,7 +675,12 @@ def method_lineage(
                 return resolve_chained_with_classes(obj_call, parent_cls, file_name)
             return map_class_method_call(obj_call, parent_cls, file_name)
 
-        df_clean["class_method_call"] = df_clean.apply(map_or_resolve, axis=1)
+        # apply(axis=1) is slow for large DataFrames — iterate records instead
+        _cmc_values = [
+            map_or_resolve(row)
+            for row in df_clean[["object_call", "class_interface_name", "file_name"]].to_dict("records")
+        ]
+        df_clean["class_method_call"] = _cmc_values
         df_clean["class_method_call"] = df_clean["class_method_call"].astype(str).str.replace(
             r'\s*&amp;lt;[^&amp;gt]+&amp;gt;\s*', '', regex=True
         ).str.replace(r'\s*<[^>]+>\s*', '', regex=True)
@@ -714,17 +723,19 @@ def method_lineage(
             return segments
 
         def explode_cleaned_ast_details(df_clean_local):
-            rows = []
+            # Convert to list-of-dicts once — much faster than iterrows()
+            records = df_clean_local.to_dict("records")
             single_seg_pat_paren = re.compile(r'^\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*\([^)]*\)\s*$')
             single_seg_pat_noparen = re.compile(r'^\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*$')
 
-            for _, row in df_clean_local.iterrows():
-                obj_call = str(row.get("object_call", "")).strip()
-                parent_class = str(row.get("class_interface_name", "")).strip()
-                file_name = str(row.get("file_name", "")).strip()
+            rows = []
+            for row in records:
+                obj_call = str(row.get("object_call", "") or "").strip()
+                parent_class = str(row.get("class_interface_name", "") or "").strip()
+                file_name = str(row.get("file_name", "") or "").strip()
 
                 obj_call = normalize_keyword_rooted_call(obj_call, parent_class)
-                cmc = normalize_keyword_rooted_call(str(row.get("class_method_call", "")).strip(), parent_class)
+                cmc = normalize_keyword_rooted_call(str(row.get("class_method_call", "") or "").strip(), parent_class)
 
                 base_context = {
                     "file_name": row.get("file_name"),
@@ -962,9 +973,10 @@ def method_lineage(
         rx_qual = re.compile(r'^\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*\(\s*\)\s*$')
         rx_unq = re.compile(r'^\s*([A-Za-z_]\w*)\s*(?:\(\s*\))?\s*$')
 
-        for _, row_x in df_clean_exploded.iterrows():
-            cmc = str(row_x.get("class_method_call", "")).strip()
-            parent_cls = str(row_x.get("class_interface_name", "")).strip()
+        # Use to_dict("records") — 50–100× faster than iterrows() on large DataFrames
+        for row_x in df_clean_exploded[["class_method_call", "class_interface_name"]].to_dict("records"):
+            cmc = str(row_x.get("class_method_call", "") or "").strip()
+            parent_cls = str(row_x.get("class_interface_name", "") or "").strip()
             if not cmc:
                 continue
 
@@ -1089,10 +1101,10 @@ def method_lineage(
             
         def build_type_to_path_including_nested(source_files):
             """
-            Build a type-to-file index using the already-created source list.
-
-            Raw source ASTs are cached, so every source file is parsed at
-            most once by this function.
+            Build a type-to-file index.  Uses the shared raw_ast_cache so
+            files are never parsed more than once per run.  Falls back to a
+            fast regex scan for files that failed to parse with javalang
+            (saves a second parse attempt per failing file).
             """
             mapping = {}
 
@@ -1102,23 +1114,37 @@ def method_lineage(
                 javalang.tree.EnumDeclaration,
             )
 
+            # Regex fallback for files whose AST is unavailable
+            _decl_re = re.compile(
+                r'\b(?:class|interface|enum)\s+([A-Za-z_]\w*)',
+                re.MULTILINE,
+            )
+
             for fpath in source_files:
-                try:
-                    tree = parse_raw_ast_cached(fpath)
-                except Exception:
-                    continue
+                tree = raw_ast_cache.get(fpath)  # may be None (not yet cached)
+                if tree is None:
+                    try:
+                        tree = parse_raw_ast_cached(fpath)
+                    except Exception:
+                        tree = False  # parse failed
+                        raw_ast_cache[fpath] = tree
 
-                for _, decl in tree.filter(declaration_types):
-                    name = getattr(decl, "name", None)
-
-                    if not name:
-                        continue
-
-                    mapping.setdefault(name, fpath)
-
-                    if name.endswith("Impl"):
-                        iface_name = name[:-4]
-                        mapping.setdefault(iface_name, fpath)
+                if tree and tree is not False:
+                    for _, decl in tree.filter(declaration_types):
+                        name = getattr(decl, "name", None)
+                        if not name:
+                            continue
+                        mapping.setdefault(name, fpath)
+                        if name.endswith("Impl"):
+                            mapping.setdefault(name[:-4], fpath)
+                else:
+                    # AST unavailable — use regex on cached text (no extra I/O)
+                    text = file_content_cache.get(fpath, "")
+                    for m in _decl_re.finditer(text):
+                        name = m.group(1)
+                        mapping.setdefault(name, fpath)
+                        if name.endswith("Impl"):
+                            mapping.setdefault(name[:-4], fpath)
 
             return mapping
 
@@ -1682,13 +1708,20 @@ def method_lineage(
 
         loc_lookup = {}
 
-        for row in df_unique_methods.to_dict("records"):
-            key = row["class_method_key"]
+        # Parallelise LOC computation — each call is independent and I/O-bound
+        # (file reads hit the in-process cache after the first access).
+        _unique_rows = [
+            row for row in df_unique_methods.to_dict("records")
+            if row["class_method_key"] not in loc_lookup
+        ]
 
-            if key in loc_lookup:
-                continue
+        def _compute_loc(row):
+            return row["class_method_key"], extract_loc_any(row)
 
-            loc_lookup[key] = extract_loc_any(row)
+        _loc_workers = min(8, (multiprocessing.cpu_count() or 4))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=_loc_workers) as _loc_pool:
+            for _key, _val in _loc_pool.map(_compute_loc, _unique_rows):
+                loc_lookup.setdefault(_key, _val)
 
         df_unique_methods["Number_Of_Lines"] = (
             df_unique_methods["class_method_key"].map(loc_lookup)

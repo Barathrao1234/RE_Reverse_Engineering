@@ -348,16 +348,28 @@ def method_lineage(
     file_map = {}
     errors = []
 
-    # Single unified progress bar: 0% → 100% across the whole pipeline.
-    # Steps and their allocated weight (must sum to 100):
-    #   BFS discovery        : 10
-    #   Parallel file parse  : 50
-    #   Chain resolution     : 15
-    #   LOC computation      : 15
-    #   Write Excel          : 10
-    _pbar = tqdm(total=100, desc="Overall progress", unit="%",
-                 bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}% [{elapsed}<{remaining}] {postfix}",
-                 ncols=90, dynamic_ncols=True)
+    # ── Single progress bar: 0 → 100 across the whole pipeline ──────────────
+    # Checkpoints (cumulative %):
+    #   10  BFS discovery done
+    #   60  All files parsed
+    #   75  Chain resolution done
+    #   90  LOC computation done
+    #  100  Excel written
+    _pbar = tqdm(
+        total=100,
+        desc="Progress",
+        unit="%",
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}% [{elapsed}<{remaining}] {postfix}",
+        ncols=90,
+        dynamic_ncols=True,
+    )
+
+    def _pbar_goto(target_pct, label):
+        """Jump the bar to exactly target_pct, regardless of where it currently is."""
+        delta = target_pct - _pbar.n
+        if delta > 0:
+            _pbar.update(delta)
+        _pbar.set_postfix_str(label)
 
     # -----------------------------------------------------------
     # Performance caches and project file indexes
@@ -437,10 +449,8 @@ def method_lineage(
     )
 
     _pbar.set_postfix_str("BFS: discovering files...")
-    _bfs_processed = 0
     while _bfs_queue:
         _cur = _bfs_queue.popleft()
-        _bfs_processed += 1
         try:
             _raw = _bfs_read(_cur)
         except Exception as _e:
@@ -481,9 +491,8 @@ def method_lineage(
                 if _dep:
                     _enqueue(_dep)
 
-    # BFS complete → advance to 10%
-    _pbar.update(10)
-    _pbar.set_postfix_str(f"BFS done: {len(java_files)} files found")
+    # ── Checkpoint 10% ──
+    _pbar_goto(10, f"BFS done: {len(java_files)} files found")
     log_time(f"BFS complete: {len(java_files)} reachable files from {len(controller_files or [])} controller(s)")
 
     # -----------------------------------------------------------
@@ -589,17 +598,13 @@ def method_lineage(
         }
         _total_files = len(_futures)
         _parse_done = 0
-        _parse_weight = 50  # 10% → 60%
         for _fut in concurrent.futures.as_completed(_futures):
             _file_path = _futures[_fut]
             _file = os.path.basename(_file_path)
             _parse_done += 1
-            # Advance the bar proportionally within the 50-point parse window
-            _new_pct = int(_parse_done / max(_total_files, 1) * _parse_weight)
-            _prev_pct = int((_parse_done - 1) / max(_total_files, 1) * _parse_weight)
-            if _new_pct > _prev_pct:
-                _pbar.update(_new_pct - _prev_pct)
-            _pbar.set_postfix_str(f"Parsing: {_file} ({_parse_done}/{_total_files})")
+            # Proportional advance within 10% → 60% window
+            _target = 10 + int(_parse_done / max(_total_files, 1) * 50)
+            _pbar_goto(_target, f"Parsing: {_file} ({_parse_done}/{_total_files})")
             try:
                 _rows, _err = _fut.result()
             except Exception as _exc:
@@ -626,6 +631,9 @@ def method_lineage(
                 method_map.setdefault(_type_name, {})
                 method_map[_type_name][_method_name] = _calls
                 ast_results.append(_row)
+
+    # ── Checkpoint 60% ──
+    _pbar_goto(60, f"Parsing done: {len(java_files)} files")
 
         # ---- Optional chain resolution ----
     # Build an inverted index: method_name → (type, calls) for O(1) lookup
@@ -657,19 +665,18 @@ def method_lineage(
     _pbar.set_postfix_str("Resolving call chains...")
     _chain_total = max(len(method_map), 1)
     _chain_done = 0
-    _chain_weight = 15  # 60% → 75%
     for typ in method_map:
         _chain_done += 1
-        _new_pct = int(_chain_done / _chain_total * _chain_weight)
-        _prev_pct = int((_chain_done - 1) / _chain_total * _chain_weight)
-        if _new_pct > _prev_pct:
-            _pbar.update(_new_pct - _prev_pct)
+        _target = 60 + int(_chain_done / _chain_total * 15)
+        _pbar_goto(_target, f"Chains: {typ[:30]} ({_chain_done}/{_chain_total})")
         for method in method_map[typ]:
             file_name = file_map.get(typ, 'Unknown')
             for call in method_map[typ][method]:
                 chain_results.append({'File Name': file_name, 'Method Name': method, 'Object Call': call})
                 resolve_chain(call, {call})
-    _pbar.set_postfix_str("Chain resolution done")
+
+    # ── Checkpoint 75% ──
+    _pbar_goto(75, "Chain resolution done")
 
     # ---- Cleaner: system-call filtering + mapping + chain explosion ----
     def clean_and_write(df, object_class_map=None, method_return_index=None):
@@ -1864,16 +1871,15 @@ def method_lineage(
         _loc_workers = min(8, (multiprocessing.cpu_count() or 4))
         _loc_total = max(len(_unique_rows), 1)
         _loc_done = 0
-        _loc_weight = 15  # 75% → 90%
         with concurrent.futures.ThreadPoolExecutor(max_workers=_loc_workers) as _loc_pool:
             for _key, _val in _loc_pool.map(_compute_loc, _unique_rows):
                 loc_lookup.setdefault(_key, _val)
                 _loc_done += 1
-                _new_pct = int(_loc_done / _loc_total * _loc_weight)
-                _prev_pct = int((_loc_done - 1) / _loc_total * _loc_weight)
-                if _new_pct > _prev_pct:
-                    _pbar.update(_new_pct - _prev_pct)
-        _pbar.set_postfix_str("LOC computation done")
+                _target = 75 + int(_loc_done / _loc_total * 15)
+                _pbar_goto(_target, f"LOC: {_loc_done}/{_loc_total} methods")
+
+        # ── Checkpoint 90% ──
+        _pbar_goto(90, "LOC done")
 
         df_unique_methods["Number_Of_Lines"] = (
             df_unique_methods["class_method_key"].map(loc_lookup)
@@ -1916,9 +1922,8 @@ def method_lineage(
             df_clean_exploded.to_excel(writer,sheet_name="Cleaned_AST_Details",index=False)
             df_application_properties.to_excel(writer,sheet_name="application.properties",index=False)
 
-        # Excel written → advance to 100% and close bar
-        _pbar.update(10)
-        _pbar.set_postfix_str(f"Done → {os.path.basename(all_methods)}")
+        # ── Checkpoint 100% ──
+        _pbar_goto(100, f"Done -> {os.path.basename(all_methods)}")
         _pbar.close()
         return os.path.abspath(all_methods)
 

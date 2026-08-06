@@ -28,6 +28,13 @@ re_message_key = re.compile(
     r'messageSource\.getMessage\s*\(\s*["\']([^"\']+)["\']'
 )
 
+# Pre-compiled patterns reused inside fallback_parse / find_calls_in_method
+_re_throw_new = re.compile(r'\bthrow\s+new\s+([A-Za-z_]\w+)\s*\(', re.MULTILINE)
+_re_unqualified_method_decl = re.compile(
+    r'\b(?:public|private|protected)\b[^{;]*\b(\w+)\s*\(',
+    re.MULTILINE,
+)
+
 # Java 8 method declaration regex — same structure as Java 18 adapter but
 # explicitly excludes 'var' as a return type (Java 10+ only).
 re_method_decl = re.compile(
@@ -484,12 +491,32 @@ class JavaAdapter(LanguageAdapter):
     # Method source extraction
     # ------------------------------------------------------------------
 
+    # Cache of code-id → cumulative line offsets so we only build it once per file
+    _line_offset_cache: dict = {}
+
+    def _get_line_offsets(self, code: str, lines) -> list:
+        """Return cumulative byte offsets for each line (cached per code object)."""
+        key = id(code)
+        cached = self._line_offset_cache.get(key)
+        if cached is not None:
+            return cached
+        offsets = [0] * (len(lines) + 1)
+        for i, ln in enumerate(lines):
+            offsets[i + 1] = offsets[i] + len(ln)
+        self._line_offset_cache[key] = offsets
+        # Evict old entries to cap memory (keep last 8 files)
+        if len(self._line_offset_cache) > 8:
+            oldest = next(iter(self._line_offset_cache))
+            del self._line_offset_cache[oldest]
+        return offsets
+
     def _get_method_source(self, code: str, method_node):
         try:
             lines = code.splitlines(True)
             if hasattr(method_node, "position") and method_node.position and method_node.position[0]:
                 start_line = method_node.position[0] - 1
-                start_offset = sum(len(lines[i]) for i in range(start_line))
+                offsets = self._get_line_offsets(code, lines)
+                start_offset = offsets[start_line]
                 start_brace_idx = code.find('{', start_offset)
                 if start_brace_idx == -1:
                     return None
@@ -509,10 +536,18 @@ class JavaAdapter(LanguageAdapter):
                 mname = getattr(method_node, "name", None)
                 if not mname:
                     return None
-                sig_pat = re.compile(
-                    r'\b' + re.escape(mname) + r'\s*\([^)]*\)\s*\{',
-                    re.MULTILINE | re.DOTALL
-                )
+                # Cache compiled patterns — same method name reused across many calls
+                _sig_cache = getattr(self, '_sig_pat_cache', None)
+                if _sig_cache is None:
+                    self._sig_pat_cache = {}
+                    _sig_cache = self._sig_pat_cache
+                sig_pat = _sig_cache.get(mname)
+                if sig_pat is None:
+                    sig_pat = re.compile(
+                        r'\b' + re.escape(mname) + r'\s*\([^)]*\)\s*\{',
+                        re.MULTILINE | re.DOTALL
+                    )
+                    _sig_cache[mname] = sig_pat
                 match = sig_pat.search(code)
                 if not match:
                     return None
@@ -754,6 +789,10 @@ class JavaAdapter(LanguageAdapter):
                     full_chain += f".{sel.member}()"
                 calls_set.add(full_chain)
 
+        # Pre-build sibling set ONCE (was rebuilt inside every MethodInvocation iteration)
+        _sibling_method_names = {n for n, _ in self.get_methods_in_type(type_node)}
+        _type_class_name = getattr(type_node, "name", None)
+
         # AST: MethodInvocation nodes
         for _, inv in method_node.filter(jt.MethodInvocation):
             qual = inv.qualifier or ""
@@ -765,9 +804,9 @@ class JavaAdapter(LanguageAdapter):
                 if id(inv) in _selector_invocations:
                     pass
                 else:
-                    sibling_method_names = {n for n, _ in self.get_methods_in_type(type_node)}
+                    sibling_method_names = _sibling_method_names
                     if member in sibling_method_names:
-                        class_name = getattr(type_node, "name", None)
+                        class_name = _type_class_name
                         if class_name:
                             # FIX 2: emit each chain segment independently
                             _emit_chain_segments(inv, class_name, calls)
@@ -1037,6 +1076,17 @@ class JavaAdapter(LanguageAdapter):
 
         per_method_calls = []
 
+        # Pre-build set of declared method names in this file so unqualified-call
+        # lookup is O(1) instead of O(N) re.search per call per block.
+        _declared_method_names: set = set()
+        if class_or_interface_name:
+            _decl_method_re = re.compile(
+                r'\b(?:public|private|protected)\b[^{;]*\b([A-Za-z_]\w*)\s*\(',
+                re.MULTILINE,
+            )
+            for _dm in _decl_method_re.finditer(java_code):
+                _declared_method_names.add(_dm.group(1))
+
         def _is_dyn(q: str) -> bool:
             return isinstance(q, str) and ("(" in q or ")" in q)
 
@@ -1073,10 +1123,7 @@ class JavaAdapter(LanguageAdapter):
                     continue
                 if method_name and member == method_name:
                     continue
-                if class_or_interface_name and re.search(
-                    r'\b(?:public|private|protected)\b[^{;]*\b' + re.escape(member) + r'\s*\(',
-                    java_code, re.MULTILINE
-                ):
+                if class_or_interface_name and member in _declared_method_names:
                     filtered.add(f"{class_or_interface_name}.{member}()")
                 elif self.include_unqualified or member in static_members or static_wildcard_classes:
                     filtered.add(f"{member}()")
@@ -1088,9 +1135,7 @@ class JavaAdapter(LanguageAdapter):
                 filtered.add(m.group(0))
 
             # throw new ...
-
-            throw_pat = re.compile(r'\bthrow\s+new\s+([A-Za-z_]\w+)\s*\(', re.MULTILINE)
-            for tm in throw_pat.finditer(block_text):
+            for tm in _re_throw_new.finditer(block_text):
                 ctor_class = tm.group(1)
                 filtered.add(f"{ctor_class}.{ctor_class}()")
                 args_block = self._extract_balanced_args(block_text, tm.end() - 1)

@@ -468,6 +468,19 @@ def method_lineage(
 
     log_time(f"BFS complete: {len(java_files)} reachable files from {len(controller_files or [])} controller(s)")
 
+    # -----------------------------------------------------------
+    # Copy all reachable Java files flat into OUTPUT_DIR/reachable_sources/
+    # -----------------------------------------------------------
+    import shutil
+    _sources_dir = os.path.join(OUTPUT_DIR, "reachable_sources")
+    os.makedirs(_sources_dir, exist_ok=True)
+    for _fp in java_files:
+        try:
+            shutil.copy2(_fp, os.path.join(_sources_dir, os.path.basename(_fp)))
+        except Exception as _copy_err:
+            log_time(f"Could not copy {_fp}: {_copy_err}")
+    log_time(f"Copied {len(java_files)} reachable source files to {_sources_dir}")
+
     # Build O(1) filename → path lookup (used by LOC resolver later)
     for _fp in java_files:
         file_name_to_path.setdefault(os.path.basename(_fp).lower(), _fp)

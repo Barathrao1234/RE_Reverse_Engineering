@@ -817,13 +817,15 @@ class JavaAdapter(LanguageAdapter):
             elif _is_dynamic(qual):
                 calls.add(f"{qual}.{member}()")
             else:
+                # Strip "this." prefix so "this.obj" resolves the same as "obj"
+                if qual.startswith("this."):
+                    qual = qual[5:]
                 qual = self._normalize_qualifier(qual, var_types)
                 if self._keep_qualified_call(
                     qual, var_types, imports_types, autowired_fields,
                     wildcard_packages, locals_from_new, params_set, package_name,
                 ):
-                    resolved_type = var_types.get(qual, qual)  # resolve variable → type name
-                    # FIX 2: emit each segment individually so method1 is never lost
+                    resolved_type = var_types.get(qual, qual)
                     _emit_chain_segments(inv, resolved_type, calls)
 
         # Collect ClassCreator IDs already handled via ThrowStatement

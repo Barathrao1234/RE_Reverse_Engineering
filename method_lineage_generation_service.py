@@ -25,6 +25,7 @@ from datetime import datetime
 import concurrent.futures
 import multiprocessing
 from collections import deque
+from tqdm import tqdm
 
 def log_time(message):
     with open("execution_log_new.txt", "a", encoding="utf-8") as f:
@@ -424,8 +425,12 @@ def method_lineage(
         '', text, flags=re.MULTILINE | re.DOTALL
     )
 
+    print(f"\n[1/4] BFS discovery from {len(controller_files or [])} controller(s)...")
+    _bfs_pbar = tqdm(desc="BFS discovery", unit="file", ncols=80, dynamic_ncols=True)
     while _bfs_queue:
         _cur = _bfs_queue.popleft()
+        _bfs_pbar.update(1)
+        _bfs_pbar.set_postfix_str(os.path.basename(_cur)[:30], refresh=False)
         try:
             _raw = _bfs_read(_cur)
         except Exception as _e:
@@ -466,6 +471,7 @@ def method_lineage(
                 if _dep:
                     _enqueue(_dep)
 
+    _bfs_pbar.close()
     log_time(f"BFS complete: {len(java_files)} reachable files from {len(controller_files or [])} controller(s)")
 
     # -----------------------------------------------------------
@@ -556,6 +562,7 @@ def method_lineage(
         for fp in java_files
     ]
 
+    print(f"\n[2/4] Parsing {len(java_files)} source files across {_max_proc_workers} workers...")
     # Use 'spawn' context explicitly — safer on macOS/Windows and avoids
     # fork-related deadlocks with javalang's thread-local state.
     _mp_ctx = multiprocessing.get_context('spawn')
@@ -568,7 +575,10 @@ def method_lineage(
             _proc_pool.submit(_file_worker, arg): arg[0]
             for arg in _worker_args
         }
-        for _fut in concurrent.futures.as_completed(_futures):
+        _total = len(_futures)
+        for _fut in tqdm(concurrent.futures.as_completed(_futures), total=_total,
+                         desc="Parsing files", unit="file",
+                         ncols=80, dynamic_ncols=True):
             _file_path = _futures[_fut]
             _file = os.path.basename(_file_path)
             try:
@@ -625,12 +635,17 @@ def method_lineage(
         else:
             chain_results.append({'File Name': 'Unknown', 'Method Name': current, 'Object Call': ''})
 
-    for typ in method_map:
-        for method in method_map[typ]:
-            file_name = file_map.get(typ, 'Unknown')
-            for call in method_map[typ][method]:
-                chain_results.append({'File Name': file_name, 'Method Name': method, 'Object Call': call})
-                resolve_chain(call, {call})
+    print(f"\n[3/4] Resolving call chains across {len(method_map)} classes...")
+    _total_types = len(method_map)
+    with tqdm(total=_total_types, desc="Resolving chains", unit="class", ncols=80, dynamic_ncols=True) as _chain_pbar:
+        for typ in method_map:
+            _chain_pbar.set_postfix_str(typ[:30], refresh=False)
+            for method in method_map[typ]:
+                file_name = file_map.get(typ, 'Unknown')
+                for call in method_map[typ][method]:
+                    chain_results.append({'File Name': file_name, 'Method Name': method, 'Object Call': call})
+                    resolve_chain(call, {call})
+            _chain_pbar.update(1)
 
     # ---- Cleaner: system-call filtering + mapping + chain explosion ----
     def clean_and_write(df, object_class_map=None, method_return_index=None):
@@ -1821,9 +1836,13 @@ def method_lineage(
         def _compute_loc(row):
             return row["class_method_key"], extract_loc_any(row)
 
+        print(f"\n[4/4] Computing LOC for {len(_unique_rows)} unique methods...")
         _loc_workers = min(8, (multiprocessing.cpu_count() or 4))
         with concurrent.futures.ThreadPoolExecutor(max_workers=_loc_workers) as _loc_pool:
-            for _key, _val in _loc_pool.map(_compute_loc, _unique_rows):
+            _loc_iter = _loc_pool.map(_compute_loc, _unique_rows)
+            for _key, _val in tqdm(_loc_iter, total=len(_unique_rows),
+                                   desc="Computing LOC", unit="method",
+                                   ncols=80, dynamic_ncols=True):
                 loc_lookup.setdefault(_key, _val)
 
         df_unique_methods["Number_Of_Lines"] = (

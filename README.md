@@ -1,10 +1,7 @@
-# Also populate main-process file_content_cache for LOC computation
-                if _file_path not in file_content_cache:
-                    try:
-                        with open(_file_path, "r", encoding="utf-8") as _fh:
-                            file_content_cache[_file_path] = _fh.read()
-                    except UnicodeDecodeError:
-                        with open(_file_path, "r", encoding="latin-1") as _fh:
-                            file_content_cache[_file_path] = _fh.read()
-                    except Exception:
-                        pass
+print(f"[DEBUG] java_files found by BFS : {len(java_files)}")
+print(f"[DEBUG] ast_results rows        : {len(ast_results)}")
+print(f"[DEBUG] method_map classes      : {len(method_map)}")
+print(f"[DEBUG] errors from parsing     : {len(errors)}")
+if errors:
+    for e in errors[:5]:  # show first 5 errors
+        print(f"  ERROR: {e}")

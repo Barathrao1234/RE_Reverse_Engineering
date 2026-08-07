@@ -423,69 +423,15 @@ def method_lineage(
             with open(path, "r", encoding="latin-1") as _fh:
                 return _fh.read()
 
-    # Matches field/param declarations — handles all modifiers and annotations.
-    # Covers:
-    #   private UserService userService;
-    #   private final UserService userService;
-    #   final ObjectService request;
-    #   static UserService instance;
-    #   @Autowired OrderRepo orderRepo;
-    #   public MyController(UserService userService, OrderRepo orderRepo)
-    #   final ObjectService request  <-- passed as argument
-    _field_decl_re = re.compile(
-        r'''
-        (?:@\w+(?:\([^)]*\))?\s*)*                                    # annotations e.g. @Autowired
-        (?:(?:private|public|protected|static|final|transient|volatile)\s+)*  # modifiers
-        ([A-Z][A-Za-z0-9_]*(?:<[^>]+>)?)                               # ClassName (optional generics)
-        \s+
-        ([a-z][A-Za-z0-9_]*)                                            # variableName (lowercase start)
-        \s*(?:[=;,)])                                                   # followed by = ; , or )
-        ''',
-        re.MULTILINE | re.VERBOSE
-    )
-
-    def _build_var_map(file_content):
-        """
-        Scan a Java source file for all variable declarations and return
-        a dict of { variable_name -> ClassName } (generics stripped).
-
-        Handles:
-          private UserService userService;
-          private final UserService userService;
-          final ObjectService request;
-          static UserService instance;
-          @Autowired OrderRepo orderRepo;
-          List<User> users = new ArrayList<>();
-          public MyCtrl(final ObjectService request, OrderRepo repo)
-        """
-        var_map = {}
-        for m in _field_decl_re.finditer(file_content):
-            cls = m.group(1).split('<')[0]   # strip generics e.g. List<User> -> List
-            var = m.group(2)
-            var_map[var] = cls
-        return var_map
-
-    def _extract_class_name_from_call(call, var_map=None):
-        """
-        Resolve a call string to the class name it targets.
-        Case 1: UserService.method()  -> first token is UpperCase -> return directly
-        Case 2: userService.method()  -> first token is lowercase -> look up in var_map
-        Returns None for bare method() calls (same-file, no BFS needed).
-        """
+    def _extract_class_name_from_call(call):
+        """Return the leading UpperCase class name from a call string, or None."""
         if not isinstance(call, str) or '.' not in call:
             return None
         base = call.split('.')[0].strip()
-        if not base:
+        # Only treat tokens starting with an uppercase letter as class names
+        if not base or not base[0].isupper():
             return None
-        # Case 1: already a class name (UpperCamelCase)
-        if base[0].isupper():
-            return base
-        # Case 2: lowercase variable — resolve via field/param declarations
-        if var_map:
-            resolved = var_map.get(base)
-            if resolved:
-                return resolved
-        return None
+        return base
 
     _visited_paths = set()
     java_files = []          # ordered list of reachable abs paths
@@ -545,12 +491,10 @@ def method_lineage(
             except Exception as _e2:
                 log_time(f"BFS fallback failed for {_cur}: {_e2}")
 
-        # Build variable->class map for this file so lowercase object names
-        # (e.g. userService -> UserService, request -> ObjectService) are resolved.
-        _var_map = _build_var_map(_code)
+        print(f"[DEBUG BFS] raw_calls sample: {_raw_calls[:10]}")
         for _call in _raw_calls:
-            _cls = _extract_class_name_from_call(_call, _var_map)
-            print(f"[BFS] call={_call!r:50} -> class={_cls}")
+            _cls = _extract_class_name_from_call(_call)
+            print(f"[DEBUG BFS] calls={_call} -> extracted_class={_cls} -> path={_class_to_path.get(_cls)}")
             if _cls:
                 _dep = _class_to_path.get(_cls)
                 if _dep:
@@ -558,6 +502,8 @@ def method_lineage(
 
     # ── Checkpoint 10% ──
     _pbar_goto(10, f"BFS done: {len(java_files)} files found")
+    import inspect
+    print(inspect.getsource(_extract_class_name_from_call))
     log_time(f"BFS complete: {len(java_files)} reachable files from {len(controller_files or [])} controller(s)")
 
     # -----------------------------------------------------------
@@ -815,6 +761,78 @@ def method_lineage(
                 return "{}.{}{}".format(strip_generics(parent_class), meth, rest).strip()
             return s
 
+        # ── Case 1 helper ──────────────────────────────────────────────────────
+        # Walk the extends chain to find which class actually declares a method.
+        # Returns the first ancestor (inclusive) that has the method in
+        # method_return_index, or the original class if none is found.
+        def _resolve_class_for_method(class_name, method_name, _visited=None):
+            if not class_name or not method_name:
+                return class_name
+            if _visited is None:
+                _visited = set()
+            if class_name in _visited:
+                return class_name          # cycle guard
+            _visited.add(class_name)
+
+            entry = method_return_index.get(class_name, {})
+            if method_name in entry:
+                return class_name          # found here
+
+            parent = entry.get("__extends__")
+            if parent and parent != class_name:
+                return _resolve_class_for_method(parent, method_name, _visited)
+
+            return class_name              # not found in hierarchy — keep original
+
+        # ── Case 2 helper ──────────────────────────────────────────────────────
+        # Resolve a dot-separated token path that may mix field accesses and
+        # method calls, e.g. "obj_1.field.method()" where obj_1 and field are
+        # variables/fields (no parens) and only the last segment is the call.
+        # Returns (resolved_class, remaining_call_suffix) so callers can emit
+        # "ResolvedClass.method()".
+        def _resolve_field_chain(token_path, parent_class, file_name):
+            """
+            token_path  : raw string before the final method call, e.g. "obj1.repo"
+                          OR the full call like "obj1.repo.save()" — we strip the
+                          trailing method segment if present.
+            Returns (class_name_str, method_name_str_or_None)
+            """
+            # Separate the last "(…)" method call if present
+            m_trail = re.match(r'^(.*?)\.([A-Za-z_]\w*)\s*\(.*$', token_path, re.DOTALL)
+            if m_trail:
+                prefix_path = m_trail.group(1)
+                trailing_method = m_trail.group(2)
+            else:
+                prefix_path = token_path
+                trailing_method = None
+
+            # Walk each dot-separated token through object_class_map
+            tokens = [t.strip() for t in prefix_path.split('.') if t.strip()]
+            current_class = None
+            for i, tok in enumerate(tokens):
+                if i == 0:
+                    # First token: resolve through _lookup_type (handles
+                    # object_class_map, iface_to_impl, etc.)
+                    current_class = _lookup_type(tok, parent_class, file_name)
+                else:
+                    # Subsequent tokens: treat as a field name on current_class.
+                    # Look it up in object_class_map scoped to any file that
+                    # defines current_class, then fall back to global key.
+                    resolved = (
+                        object_class_map.get((file_name.lower(), tok.lower()))
+                        or object_class_map.get(tok.lower())
+                    )
+                    if resolved:
+                        current_class = strip_generics(resolved)
+                    else:
+                        # Try as a return type from the previous class's method
+                        ret = method_return_index.get(current_class, {}).get(tok)
+                        if ret and str(ret).lower() not in ('void', '<constructor>'):
+                            current_class = strip_generics(str(ret).split('.')[-1])
+                        # else: keep current_class (best effort)
+
+            return current_class or strip_generics(parent_class), trailing_method
+
         def _lookup_type(base, parent_class, file_name):
             if not isinstance(base, str) or base.strip() == "":
                 return strip_generics(parent_class)
@@ -865,6 +883,14 @@ def method_lineage(
             rest = obj_call[first_dot + 1:]
 
             mapped_base = _lookup_type(obj, parent_class, file_name)
+
+            # Case 1: if the immediate call token after the dot is a plain method
+            # name (no further dots), check whether mapped_base actually declares
+            # it; if not, walk up the extends chain and use the ancestor instead.
+            method_token = rest.split('(')[0].split('.')[0].strip()
+            if method_token:
+                mapped_base = _resolve_class_for_method(mapped_base, method_token)
+
             return "{}.{}".format(mapped_base, rest)
 
         def resolve_chained_with_classes(obj_call, parent_class, file_name):
@@ -874,19 +900,37 @@ def method_lineage(
             if first_dot == -1 or "(" not in obj_call:
                 return map_class_method_call(obj_call, parent_class, file_name)
 
-            base = obj_call[:first_dot].strip()
-            rest = obj_call[first_dot + 1:]
-            methods = re.findall(r'([A-Za-z_]\w*)\s*\(', rest)
-            if not methods:
+            # Case 2: the segment before the first "(" may contain field accesses,
+            # e.g. "obj1.repo.dao.save()" — resolve through _resolve_field_chain
+            # so the class for obj1.repo.dao is found even though none of those
+            # intermediate tokens are method calls.
+            first_paren = obj_call.find("(")
+            prefix_before_call = obj_call[:first_paren]   # e.g. "obj1.repo.dao.save"
+            suffix_after_prefix = obj_call[first_paren:]  # e.g. "(...).next()"
+
+            # _resolve_field_chain strips the trailing method token from prefix
+            current_class, first_method = _resolve_field_chain(
+                prefix_before_call, parent_class, file_name
+            )
+
+            if not first_method:
+                # Nothing to render — fall back
                 return map_class_method_call(obj_call, parent_class, file_name)
 
-            current_class = _lookup_type(base, parent_class, file_name)
+            # Collect every subsequent method segment after the first call's ")"
+            # e.g. ".next().save()" from "obj1.method().next().save()"
+            remaining_methods = re.findall(r'\.([A-Za-z_]\w*)\s*\(', suffix_after_prefix)
+            methods = [first_method] + remaining_methods
 
             chain_render = []
             for m in methods:
-                chain_render.append("{}.{}()".format(strip_generics(current_class), m))
-                ret_type = method_return_index.get(current_class, {}).get(m)
-                if not ret_type or str(ret_type).lower() == 'void':
+                # Case 1: walk extends if this class doesn't directly own the method
+                owning_class = _resolve_class_for_method(
+                    strip_generics(current_class), m
+                )
+                chain_render.append("{}.{}()".format(strip_generics(owning_class), m))
+                ret_type = method_return_index.get(owning_class, {}).get(m)
+                if not ret_type or str(ret_type).lower() in ('void', '<constructor>'):
                     break
                 current_class = strip_generics(str(ret_type).split('.')[-1])
             return ".".join(chain_render)
@@ -918,30 +962,45 @@ def method_lineage(
                 m = re.match(r'^\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*\(', obj_call)
                 if m:
                     cls, mtd = strip_generics(m.group(1)), m.group(2)
-                    return ["{}.{}()".format(cls, mtd)]
+                    # Case 1: walk extends for single-segment calls too
+                    owning = _resolve_class_for_method(cls, mtd)
+                    return ["{}.{}()".format(owning, mtd)]
                 m2 = re.match(r'^\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*$', obj_call)
                 if m2:
                     cls, mtd = strip_generics(m2.group(1)), m2.group(2)
-                    return ["{}.{}()".format(cls, mtd)]
+                    owning = _resolve_class_for_method(cls, mtd)
+                    return ["{}.{}()".format(owning, mtd)]
                 return []
 
-            base = obj_call[:first_dot].strip()
-            rest = obj_call[first_dot + 1:]
-            methods = re.findall(r'([A-Za-z_]\w*)\s*\(', rest)
-            if not methods:
+            # Case 2: resolve field-access chain before the first "("
+            first_paren = obj_call.find("(")
+            prefix_before_call = obj_call[:first_paren]
+            suffix_after_prefix = obj_call[first_paren:]
+
+            current_class, first_method = _resolve_field_chain(
+                prefix_before_call, parent_class, file_name
+            )
+
+            if not first_method:
                 m3 = re.match(r'^\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*$', obj_call)
                 if m3:
                     cls, mtd = strip_generics(m3.group(1)), m3.group(2)
-                    return ["{}.{}()".format(cls, mtd)]
+                    owning = _resolve_class_for_method(cls, mtd)
+                    return ["{}.{}()".format(owning, mtd)]
                 return []
 
-            current_class = _lookup_type(base, parent_class, file_name)
+            remaining_methods = re.findall(r'\.([A-Za-z_]\w*)\s*\(', suffix_after_prefix)
+            methods = [first_method] + remaining_methods
 
             segments = []
             for mtd in methods:
-                segments.append("{}.{}()".format(strip_generics(current_class), mtd))
-                ret_type = method_return_index.get(current_class, {}).get(mtd)
-                if not ret_type or str(ret_type).lower() == "void":
+                # Case 1: walk extends to find the owning ancestor class
+                owning_class = _resolve_class_for_method(
+                    strip_generics(current_class), mtd
+                )
+                segments.append("{}.{}()".format(strip_generics(owning_class), mtd))
+                ret_type = method_return_index.get(owning_class, {}).get(mtd)
+                if not ret_type or str(ret_type).lower() in ("void", "<constructor>"):
                     break
                 current_class = strip_generics(str(ret_type).split(".")[-1])
             return segments

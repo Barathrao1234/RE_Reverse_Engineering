@@ -4447,6 +4447,9 @@ class JavaAdapter(LanguageAdapter):
             """
             # Always emit the root segment independently
             calls_set.add(f"{resolved_root}.{start_inv.member}()")
+            # Record every method name emitted with a real class prefix so the
+            # regex fallback path can suppress the bare unqualified duplicates.
+            _ast_qualified_methods.add(start_inv.member)
             # Also emit the full chain so the cleaner can resolve downstream
             selectors = [s for s in (start_inv.selectors or [])
                          if isinstance(s, jt.MethodInvocation)]
@@ -4454,11 +4457,18 @@ class JavaAdapter(LanguageAdapter):
                 full_chain = f"{resolved_root}.{start_inv.member}()"
                 for sel in selectors:
                     full_chain += f".{sel.member}()"
+                    _ast_qualified_methods.add(sel.member)
                 calls_set.add(full_chain)
 
         # Pre-build sibling set ONCE (was rebuilt inside every MethodInvocation iteration)
         _sibling_method_names = {n for n, _ in self.get_methods_in_type(type_node)}
         _type_class_name = getattr(type_node, "name", None)
+
+        # Track every method name the AST path emits with a resolved class prefix
+        # (e.g. "RequestorValidator.validate") so the regex fallback path below
+        # does not re-emit them as bare unqualified calls ("validate", "setMaxPageSize")
+        # which the cleaner cannot attribute and which become spurious output rows.
+        _ast_qualified_methods: set = set()
 
         # AST: MethodInvocation nodes
         for _, inv in method_node.filter(jt.MethodInvocation):
@@ -4492,7 +4502,15 @@ class JavaAdapter(LanguageAdapter):
                     qual, var_types, imports_types, autowired_fields,
                     wildcard_packages, locals_from_new, params_set, package_name,
                 ):
-                    resolved_type = var_types.get(qual, qual)
+                    # Resolve the variable name to its declared class.
+                    # var_types covers local variables and parameters;
+                    # autowired_fields covers all field declarations (injected or plain private).
+                    # Without the autowired_fields fallback, plain private fields like
+                    #   private RequestDetailsValidator requestDetailsValidator;
+                    # resolve to the bare variable name ("requestDetailsValidator")
+                    # instead of the class name ("RequestDetailsValidator"), producing
+                    # a lowercase-rooted call that the cleaner silently drops.
+                    resolved_type = var_types.get(qual) or autowired_fields.get(qual) or qual
                     _emit_chain_segments(inv, resolved_type, calls)
 
         # Collect ClassCreator IDs already handled via ThrowStatement
@@ -4587,7 +4605,15 @@ class JavaAdapter(LanguageAdapter):
                     elif leading[0].isupper():
                         # Looks like a class name (UpperCamelCase) — keep as-is
                         calls.add(chain)
-                    # else: unknown lowercase token — skip to avoid false attribution
+                    else:
+                        # Lowercase token not in var_types — try autowired/private fields.
+                        # e.g. "requestorValidator.validate(...)" where requestorValidator
+                        # is a plain private field (not @Autowired) lives in autowired_fields.
+                        field_type = autowired_fields.get(leading)
+                        if field_type:
+                            chain = field_type + chain[len(leading):]
+                            calls.add(chain)
+                        # else: truly unknown — skip to avoid false attribution
                 else:
                     # No leading "Word." prefix.  This happens for constructor-rooted
                     # chains like "BigDecimal(quantity).multiply(price)" where the
@@ -4612,6 +4638,11 @@ class JavaAdapter(LanguageAdapter):
                 if bare in chained_claimed_methods:
                     # chained_pat already emitted a properly qualified version;
                     # the bare unqualified form would be attributed to this class — skip.
+                    continue
+                if bare in _ast_qualified_methods:
+                    # The AST path already emitted this method with its correct class prefix
+                    # (e.g. "RequestorValidator.validate"). Suppress the bare form here —
+                    # it would produce a spurious row attributed to the wrong class.
                     continue
                 calls.add(dyn)
 

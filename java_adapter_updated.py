@@ -4518,6 +4518,51 @@ class JavaAdapter(LanguageAdapter):
                     resolved_type = var_types.get(qual) or autowired_fields.get(qual) or qual
                     _emit_chain_segments(inv, resolved_type, calls)
 
+        # ---------------------------------------------------------------
+        # Handle this.field.method() calls — javalang parses these as a
+        # This node with selectors, NOT as a MethodInvocation with a
+        # qualifier.  The MethodInvocation loop above never sees them.
+        #
+        # AST shape for  this.requestorValidator.validate(...) :
+        #   This(selectors=[
+        #       MemberReference(member="requestorValidator"),
+        #       MethodInvocation(member="validate", qualifier=None)
+        #   ])
+        #
+        # We walk every This node in the method body, find the first
+        # MemberReference selector (the field name), resolve it to its
+        # declared class via autowired_fields / var_types, then emit
+        # every subsequent MethodInvocation selector as a qualified call.
+        # ---------------------------------------------------------------
+        for _, this_node in method_node.filter(jt.This):
+            selectors = getattr(this_node, "selectors", None) or []
+            if not selectors:
+                continue
+
+            # First selector must be a MemberReference — that is the field name
+            # e.g. "requestorValidator", "requestDetailsValidator"
+            first = selectors[0]
+            if not isinstance(first, jt.MemberReference):
+                continue
+            field_name = first.member
+
+            # Resolve field name → declared class name
+            resolved_class = (
+                autowired_fields.get(field_name)
+                or var_types.get(field_name)
+                or field_name   # last resort: keep as-is (will be lowercase, cleaner drops it)
+            )
+
+            # Walk remaining selectors — emit every MethodInvocation
+            for sel in selectors[1:]:
+                if isinstance(sel, jt.MethodInvocation):
+                    calls.add(f"{resolved_class}.{sel.member}()")
+                    _ast_qualified_methods.add(sel.member)
+                elif isinstance(sel, jt.MemberReference):
+                    # Further field chaining (rare): update resolved class via
+                    # method_return_index if available, otherwise skip.
+                    pass  # future: chain through method_return_index
+
         # Collect ClassCreator IDs already handled via ThrowStatement
         _throw_creators = set()
         for _, th in method_node.filter(jt.ThrowStatement):

@@ -28,7 +28,7 @@ from collections import deque
 from tqdm import tqdm
 
 def log_time(message):
-    with open("execution_log_new.txt", "a", encoding="utf-8") as f:
+    with open("execution_service    .txt", "a", encoding="utf-8") as f:
         f.write(f"{datetime.now()} - {message}\n")
 
 
@@ -316,6 +316,7 @@ def _file_worker(args):
 
 
 def method_lineage(
+    service_files,
     adapter,
     details,
     data,
@@ -331,6 +332,7 @@ def method_lineage(
     accept_parameter_types=True,
     accept_same_package=True
 ):
+    print("controller_files : ",controller_files)
     """
     Produces Excel with three sheets:
       - Cleaned_AST_Details (Class.method exploded per chain segment)
@@ -347,6 +349,29 @@ def method_lineage(
     method_map = {}
     file_map = {}
     errors = []
+
+    # ── Single progress bar: 0 → 100 across the whole pipeline ──────────────
+    # Checkpoints (cumulative %):
+    #   10  BFS discovery done
+    #   60  All files parsed
+    #   75  Chain resolution done
+    #   90  LOC computation done
+    #  100  Excel written
+    _pbar = tqdm(
+        total=100,
+        desc="Progress",
+        unit="%",
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}% [{elapsed}<{remaining}] {postfix}",
+        ncols=90,
+        dynamic_ncols=True,
+    )
+
+    def _pbar_goto(target_pct, label):
+        """Jump the bar to exactly target_pct, regardless of where it currently is."""
+        delta = target_pct - _pbar.n
+        if delta > 0:
+            _pbar.update(delta)
+        _pbar.set_postfix_str(label)
 
     # -----------------------------------------------------------
     # Performance caches and project file indexes
@@ -385,6 +410,10 @@ def method_lineage(
                 # XxxImpl → also register as Xxx so callers of the interface find it
                 if _stem.endswith("Impl"):
                     _class_to_path.setdefault(_stem[:-4], _abs)
+    print(f"[DEBUG] _class_to_path total entities : {len(_class_to_path)}")
+    print(f"[DEBUG] sample entites: ")
+    for k,v in list(_class_to_path.items())[:10]:
+        print(f"  {k} -> {v}")
 
     def _bfs_read(path):
         try:
@@ -394,40 +423,40 @@ def method_lineage(
             with open(path, "r", encoding="latin-1") as _fh:
                 return _fh.read()
 
-    # Matches field/param declarations — handles modifiers (final, private, static, etc.)
-    # and annotations on the same line (@Autowired, @Qualifier, etc.)
-    # Examples covered:
+    # Matches field/param declarations — handles all modifiers and annotations.
+    # Covers:
     #   private UserService userService;
     #   private final UserService userService;
     #   final ObjectService request;
     #   static UserService instance;
     #   @Autowired OrderRepo orderRepo;
     #   public MyController(UserService userService, OrderRepo orderRepo)
-    #   List<User> users = ...
+    #   final ObjectService request  <-- passed as argument
     _field_decl_re = re.compile(
         r'''
-        (?:@\w+(?:\([^)]*\))?\s*)*          # zero or more annotations e.g. @Autowired
+        (?:@\w+(?:\([^)]*\))?\s*)*                                    # annotations e.g. @Autowired
         (?:(?:private|public|protected|static|final|transient|volatile)\s+)*  # modifiers
-        ([A-Z][A-Za-z0-9_]*(?:<[^>]+>)?)       # ClassName (with optional generics)
+        ([A-Z][A-Za-z0-9_]*(?:<[^>]+>)?)                               # ClassName (optional generics)
         \s+
-        ([a-z][A-Za-z0-9_]*)                   # variableName (must start lowercase)
-        \s*(?:[=;,)])                           # followed by = ; , or )
+        ([a-z][A-Za-z0-9_]*)                                            # variableName (lowercase start)
+        \s*(?:[=;,)])                                                   # followed by = ; , or )
         ''',
         re.MULTILINE | re.VERBOSE
     )
 
     def _build_var_map(file_content):
         """
-        Scan a Java source file for field/parameter declarations and return
+        Scan a Java source file for all variable declarations and return
         a dict of { variable_name -> ClassName } (generics stripped).
 
-        Handles all common patterns:
+        Handles:
           private UserService userService;
           private final UserService userService;
           final ObjectService request;
           static UserService instance;
           @Autowired OrderRepo orderRepo;
           List<User> users = new ArrayList<>();
+          public MyCtrl(final ObjectService request, OrderRepo repo)
         """
         var_map = {}
         for m in _field_decl_re.finditer(file_content):
@@ -439,10 +468,9 @@ def method_lineage(
     def _extract_class_name_from_call(call, var_map=None):
         """
         Resolve a call string to the class name it targets.
-        Handles two cases:
-          1. A.method()  — A is already UpperCase (direct class/static call)
-          2. a.method()  — a is a variable; look up its declared type in var_map
-        Returns None for bare method() calls (same-file calls, no BFS needed).
+        Case 1: UserService.method()  -> first token is UpperCase -> return directly
+        Case 2: userService.method()  -> first token is lowercase -> look up in var_map
+        Returns None for bare method() calls (same-file, no BFS needed).
         """
         if not isinstance(call, str) or '.' not in call:
             return None
@@ -452,7 +480,7 @@ def method_lineage(
         # Case 1: already a class name (UpperCamelCase)
         if base[0].isupper():
             return base
-        # Case 2: lowercase variable — resolve via field declarations
+        # Case 2: lowercase variable — resolve via field/param declarations
         if var_map:
             resolved = var_map.get(base)
             if resolved:
@@ -471,7 +499,8 @@ def method_lineage(
             _bfs_queue.append(abs_p)
 
     # Seed from controller_files
-    for _cf in (controller_files or []):
+    for _cf in (service_files or []):
+        print(f"[DEBUG] controller path exists: {os.path.isfile(_cf)} -> {_cf}")
         _enqueue(_cf)
 
     # Step 2: BFS — parse each file, extract callees, enqueue their files
@@ -480,6 +509,7 @@ def method_lineage(
         '', text, flags=re.MULTILINE | re.DOTALL
     )
 
+    _pbar.set_postfix_str("BFS: discovering files...")
     while _bfs_queue:
         _cur = _bfs_queue.popleft()
         try:
@@ -516,15 +546,18 @@ def method_lineage(
                 log_time(f"BFS fallback failed for {_cur}: {_e2}")
 
         # Build variable->class map for this file so lowercase object names
-        # (e.g. userService -> UserService) can be resolved during BFS.
+        # (e.g. userService -> UserService, request -> ObjectService) are resolved.
         _var_map = _build_var_map(_code)
         for _call in _raw_calls:
             _cls = _extract_class_name_from_call(_call, _var_map)
+            print(f"[BFS] call={_call!r:50} -> class={_cls}")
             if _cls:
                 _dep = _class_to_path.get(_cls)
                 if _dep:
                     _enqueue(_dep)
 
+    # ── Checkpoint 10% ──
+    _pbar_goto(10, f"BFS done: {len(java_files)} files found")
     log_time(f"BFS complete: {len(java_files)} reachable files from {len(controller_files or [])} controller(s)")
 
     # -----------------------------------------------------------
@@ -619,6 +652,7 @@ def method_lineage(
     # fork-related deadlocks with javalang's thread-local state.
     _mp_ctx = multiprocessing.get_context('spawn')
 
+    _pbar.set_postfix_str(f"Parsing {len(java_files)} files...")
     with concurrent.futures.ProcessPoolExecutor(
         max_workers=_max_proc_workers,
         mp_context=_mp_ctx,
@@ -627,10 +661,15 @@ def method_lineage(
             _proc_pool.submit(_file_worker, arg): arg[0]
             for arg in _worker_args
         }
-        _total = len(_futures)
-        for _fut in tqdm(concurrent.futures.as_completed(_futures), total=_total, desc="Parsing files", unit="file", ncols=80):
+        _total_files = len(_futures)
+        _parse_done = 0
+        for _fut in concurrent.futures.as_completed(_futures):
             _file_path = _futures[_fut]
             _file = os.path.basename(_file_path)
+            _parse_done += 1
+            # Proportional advance within 10% → 60% window
+            _target = 10 + int(_parse_done / max(_total_files, 1) * 50)
+            _pbar_goto(_target, f"Parsing: {_file} ({_parse_done}/{_total_files})")
             try:
                 _rows, _err = _fut.result()
             except Exception as _exc:
@@ -658,6 +697,19 @@ def method_lineage(
                 method_map[_type_name][_method_name] = _calls
                 ast_results.append(_row)
 
+    # ── Checkpoint 60% ──
+    _pbar_goto(60, f"Parsing done: {len(java_files)} files")
+    print(f"[DEBUG] java_files found by BFS : {len(java_files)}") 
+    print(f"[DEBUG] ast_results rows : {len(ast_results)}") 
+    print(f"[DEBUG] method_map classes : {len(method_map)}") 
+    print(f"[DEBUG] errors from parsing : {len(errors)}") 
+    if errors:
+        for e in errors[:5]:
+            print(f"ERROR FILE: {e.get('File')}")
+            print(f"ERROR MSG : {e.get('Error')}")
+    if errors: 
+        for e in errors[:5]: # show first 5 errors 
+            print(f" ERROR: {e}")
         # ---- Optional chain resolution ----
     # Build an inverted index: method_name → (type, calls) for O(1) lookup
     # instead of scanning all types on every resolve_chain call (was O(N²)).
@@ -685,12 +737,21 @@ def method_lineage(
         else:
             chain_results.append({'File Name': 'Unknown', 'Method Name': current, 'Object Call': ''})
 
+    _pbar.set_postfix_str("Resolving call chains...")
+    _chain_total = max(len(method_map), 1)
+    _chain_done = 0
     for typ in method_map:
+        _chain_done += 1
+        _target = 60 + int(_chain_done / _chain_total * 15)
+        _pbar_goto(_target, f"Chains: {typ[:30]} ({_chain_done}/{_chain_total})")
         for method in method_map[typ]:
             file_name = file_map.get(typ, 'Unknown')
             for call in method_map[typ][method]:
                 chain_results.append({'File Name': file_name, 'Method Name': method, 'Object Call': call})
                 resolve_chain(call, {call})
+
+    # ── Checkpoint 75% ──
+    _pbar_goto(75, "Chain resolution done")
 
     # ---- Cleaner: system-call filtering + mapping + chain explosion ----
     def clean_and_write(df, object_class_map=None, method_return_index=None):
@@ -1881,10 +1942,19 @@ def method_lineage(
         def _compute_loc(row):
             return row["class_method_key"], extract_loc_any(row)
 
+        _pbar.set_postfix_str(f"Computing LOC for {len(_unique_rows)} methods...")
         _loc_workers = min(8, (multiprocessing.cpu_count() or 4))
+        _loc_total = max(len(_unique_rows), 1)
+        _loc_done = 0
         with concurrent.futures.ThreadPoolExecutor(max_workers=_loc_workers) as _loc_pool:
             for _key, _val in _loc_pool.map(_compute_loc, _unique_rows):
                 loc_lookup.setdefault(_key, _val)
+                _loc_done += 1
+                _target = 75 + int(_loc_done / _loc_total * 15)
+                _pbar_goto(_target, f"LOC: {_loc_done}/{_loc_total} methods")
+
+        # ── Checkpoint 90% ──
+        _pbar_goto(90, "LOC done")
 
         df_unique_methods["Number_Of_Lines"] = (
             df_unique_methods["class_method_key"].map(loc_lookup)
@@ -1922,10 +1992,14 @@ def method_lineage(
             with pd.ExcelWriter(all_methods, engine="openpyxl", mode="w") as writer:
                 pd.DataFrame({"init": []}).to_excel(writer, sheet_name="Init", index=False)
 
+        _pbar.set_postfix_str("Writing Excel...")
         with pd.ExcelWriter(all_methods, engine="xlsxwriter") as writer:
             df_clean_exploded.to_excel(writer,sheet_name="Cleaned_AST_Details",index=False)
             df_application_properties.to_excel(writer,sheet_name="application.properties",index=False)
 
+        # ── Checkpoint 100% ──
+        _pbar_goto(100, f"Done -> {os.path.basename(all_methods)}")
+        _pbar.close()
         return os.path.abspath(all_methods)
 
     df_results = pd.DataFrame(

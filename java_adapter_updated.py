@@ -4017,14 +4017,19 @@ class JavaAdapter(LanguageAdapter):
     # ------------------------------------------------------------------
 
     def _collect_autowired_fields(self, class_node) -> dict:
+        """Collect ALL instance field declarations (not just @Autowired/@Inject).
+
+        Plain private fields like:
+            private RequestDetailsValidator requestDetailsValidator;
+            private MultiSortPagingContextValidator pagingContextValidator;
+        must be included so that calls like:
+            this.requestDetailsValidator.validate(...)
+            this.pagingContextValidator.setMaxPageSize(...)
+        pass _keep_qualified_call (which checks `if qual in autowired_fields`)
+        and resolve to the correct class name rather than the bare variable name.
+        """
         autowired = {}
         for _, fd in class_node.filter(jt.FieldDeclaration):
-            has_auto = any(
-                getattr(a, "name", "") in ("Autowired", "Inject")
-                for a in (fd.annotations or [])
-            )
-            if not has_auto:
-                continue
             tname = self._simple_type_name(fd.type)
             for decl in getattr(fd, "declarators", []):
                 autowired[decl.name] = tname
@@ -4311,7 +4316,7 @@ class JavaAdapter(LanguageAdapter):
                         qual, var_types, imports_types, autowired_fields,
                         wildcard_packages, locals_from_new, params_set, package_name,
                     ):
-                        resolved_type = var_types.get(qual, qual)
+                        resolved_type = var_types.get(qual) or autowired_fields.get(qual) or qual
                         calls.add(f"{resolved_type}.{member}()")
                 else:
                     if self._keep_unqualified_call(member, set(), set()):

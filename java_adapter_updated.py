@@ -1,4 +1,3 @@
-
 import os
 import re
 import html
@@ -26,13 +25,6 @@ re_property_source = re.compile(
 )
 re_message_key = re.compile(
     r'messageSource\.getMessage\s*\(\s*["\']([^"\']+)["\']'
-)
-
-# Pre-compiled patterns reused inside fallback_parse / find_calls_in_method
-_re_throw_new = re.compile(r'\bthrow\s+new\s+([A-Za-z_]\w+)\s*\(', re.MULTILINE)
-_re_unqualified_method_decl = re.compile(
-    r'\b(?:public|private|protected)\b[^{;]*\b(\w+)\s*\(',
-    re.MULTILINE,
 )
 
 # Java 8 method declaration regex — same structure as Java 18 adapter but
@@ -491,32 +483,12 @@ class JavaAdapter(LanguageAdapter):
     # Method source extraction
     # ------------------------------------------------------------------
 
-    # Cache of code-id → cumulative line offsets so we only build it once per file
-    _line_offset_cache: dict = {}
-
-    def _get_line_offsets(self, code: str, lines) -> list:
-        """Return cumulative byte offsets for each line (cached per code object)."""
-        key = id(code)
-        cached = self._line_offset_cache.get(key)
-        if cached is not None:
-            return cached
-        offsets = [0] * (len(lines) + 1)
-        for i, ln in enumerate(lines):
-            offsets[i + 1] = offsets[i] + len(ln)
-        self._line_offset_cache[key] = offsets
-        # Evict old entries to cap memory (keep last 8 files)
-        if len(self._line_offset_cache) > 8:
-            oldest = next(iter(self._line_offset_cache))
-            del self._line_offset_cache[oldest]
-        return offsets
-
     def _get_method_source(self, code: str, method_node):
         try:
             lines = code.splitlines(True)
             if hasattr(method_node, "position") and method_node.position and method_node.position[0]:
                 start_line = method_node.position[0] - 1
-                offsets = self._get_line_offsets(code, lines)
-                start_offset = offsets[start_line]
+                start_offset = sum(len(lines[i]) for i in range(start_line))
                 start_brace_idx = code.find('{', start_offset)
                 if start_brace_idx == -1:
                     return None
@@ -536,18 +508,10 @@ class JavaAdapter(LanguageAdapter):
                 mname = getattr(method_node, "name", None)
                 if not mname:
                     return None
-                # Cache compiled patterns — same method name reused across many calls
-                _sig_cache = getattr(self, '_sig_pat_cache', None)
-                if _sig_cache is None:
-                    self._sig_pat_cache = {}
-                    _sig_cache = self._sig_pat_cache
-                sig_pat = _sig_cache.get(mname)
-                if sig_pat is None:
-                    sig_pat = re.compile(
-                        r'\b' + re.escape(mname) + r'\s*\([^)]*\)\s*\{',
-                        re.MULTILINE | re.DOTALL
-                    )
-                    _sig_cache[mname] = sig_pat
+                sig_pat = re.compile(
+                    r'\b' + re.escape(mname) + r'\s*\([^)]*\)\s*\{',
+                    re.MULTILINE | re.DOTALL
+                )
                 match = sig_pat.search(code)
                 if not match:
                     return None
@@ -703,22 +667,8 @@ class JavaAdapter(LanguageAdapter):
         calls = set()
         package_name = self._get_package_name(code)
 
-        # FIX 1 & 3: Re-use cached AST instead of re-parsing the full file
-        # on every method call.  _raw_ast_cache is injected by configure().
-        _cache_key = id(code)  # code object is the same str within one file run
-        _cached = self._raw_ast_cache.get(_cache_key)
-        if _cached is None:
-            try:
-                _cached = javalang.parse.parse(code)
-            except Exception:
-                _cached = False  # sentinel: parse failed
-            self._raw_ast_cache[_cache_key] = _cached
-
         try:
-            if _cached and _cached is not False:
-                tree = _cached
-            else:
-                tree = javalang.parse.parse(code)
+            tree = javalang.parse.parse(code)
             imports_types, wildcard_packages, static_members, static_wildcard_classes = \
                 self._collect_com_imports(tree)
         except Exception:
@@ -767,32 +717,6 @@ class JavaAdapter(LanguageAdapter):
                     chain += f".{sel.member}()"
             return chain
 
-        def _emit_chain_segments(start_inv, resolved_root, calls_set):
-            """FIX 2: emit EACH segment of a chained call individually.
-
-            For  a.method1().method2()  where 'a' resolves to 'ClassA':
-              - emits "ClassA.method1()"  (always — we know this class)
-              - emits full chain "ClassA.method1().method2()" for downstream
-                resolution in case the cleaner can resolve method2's class.
-
-            This ensures method1 is never lost even when method2's return
-            type is missing from method_return_index.
-            """
-            # Always emit the root segment independently
-            calls_set.add(f"{resolved_root}.{start_inv.member}()")
-            # Also emit the full chain so the cleaner can resolve downstream
-            selectors = [s for s in (start_inv.selectors or [])
-                         if isinstance(s, jt.MethodInvocation)]
-            if selectors:
-                full_chain = f"{resolved_root}.{start_inv.member}()"
-                for sel in selectors:
-                    full_chain += f".{sel.member}()"
-                calls_set.add(full_chain)
-
-        # Pre-build sibling set ONCE (was rebuilt inside every MethodInvocation iteration)
-        _sibling_method_names = {n for n, _ in self.get_methods_in_type(type_node)}
-        _type_class_name = getattr(type_node, "name", None)
-
         # AST: MethodInvocation nodes
         for _, inv in method_node.filter(jt.MethodInvocation):
             qual = inv.qualifier or ""
@@ -804,12 +728,12 @@ class JavaAdapter(LanguageAdapter):
                 if id(inv) in _selector_invocations:
                     pass
                 else:
-                    sibling_method_names = _sibling_method_names
+                    sibling_method_names = {n for n, _ in self.get_methods_in_type(type_node)}
                     if member in sibling_method_names:
-                        class_name = _type_class_name
+                        class_name = getattr(type_node, "name", None)
                         if class_name:
-                            # FIX 2: emit each chain segment independently
-                            _emit_chain_segments(inv, class_name, calls)
+                            chain = _build_chain_string(inv, class_name)
+                            calls.add(chain)
                         else:
                             calls.add(f"{member}()")
                     elif self._keep_unqualified_call(member, static_members, static_wildcard_classes):
@@ -817,16 +741,15 @@ class JavaAdapter(LanguageAdapter):
             elif _is_dynamic(qual):
                 calls.add(f"{qual}.{member}()")
             else:
-                # Strip "this." prefix so "this.obj" resolves the same as "obj"
-                if qual.startswith("this."):
-                    qual = qual[5:]
                 qual = self._normalize_qualifier(qual, var_types)
                 if self._keep_qualified_call(
                     qual, var_types, imports_types, autowired_fields,
                     wildcard_packages, locals_from_new, params_set, package_name,
                 ):
-                    resolved_type = var_types.get(qual, qual)
-                    _emit_chain_segments(inv, resolved_type, calls)
+                    resolved_type = var_types.get(qual, qual)  # resolve variable → type name
+                    # Build full chain including selectors: "ABC.method1().method2()"
+                    chain = _build_chain_string(inv, resolved_type)
+                    calls.add(chain)
 
         # Collect ClassCreator IDs already handled via ThrowStatement
         _throw_creators = set()
@@ -1078,17 +1001,6 @@ class JavaAdapter(LanguageAdapter):
 
         per_method_calls = []
 
-        # Pre-build set of declared method names in this file so unqualified-call
-        # lookup is O(1) instead of O(N) re.search per call per block.
-        _declared_method_names: set = set()
-        if class_or_interface_name:
-            _decl_method_re = re.compile(
-                r'\b(?:public|private|protected)\b[^{;]*\b([A-Za-z_]\w*)\s*\(',
-                re.MULTILINE,
-            )
-            for _dm in _decl_method_re.finditer(java_code):
-                _declared_method_names.add(_dm.group(1))
-
         def _is_dyn(q: str) -> bool:
             return isinstance(q, str) and ("(" in q or ")" in q)
 
@@ -1125,7 +1037,10 @@ class JavaAdapter(LanguageAdapter):
                     continue
                 if method_name and member == method_name:
                     continue
-                if class_or_interface_name and member in _declared_method_names:
+                if class_or_interface_name and re.search(
+                    r'\b(?:public|private|protected)\b[^{;]*\b' + re.escape(member) + r'\s*\(',
+                    java_code, re.MULTILINE
+                ):
                     filtered.add(f"{class_or_interface_name}.{member}()")
                 elif self.include_unqualified or member in static_members or static_wildcard_classes:
                     filtered.add(f"{member}()")
@@ -1137,7 +1052,9 @@ class JavaAdapter(LanguageAdapter):
                 filtered.add(m.group(0))
 
             # throw new ...
-            for tm in _re_throw_new.finditer(block_text):
+
+            throw_pat = re.compile(r'\bthrow\s+new\s+([A-Za-z_]\w+)\s*\(', re.MULTILINE)
+            for tm in throw_pat.finditer(block_text):
                 ctor_class = tm.group(1)
                 filtered.add(f"{ctor_class}.{ctor_class}()")
                 args_block = self._extract_balanced_args(block_text, tm.end() - 1)
@@ -1342,27 +1259,15 @@ class JavaAdapter(LanguageAdapter):
                 if not file.endswith(self.file_extension()):
                     continue
                 fpath = os.path.join(root, file)
-                # FIX 3: reuse cached file content and parsed AST
                 try:
-                    if fpath in self._file_content_cache:
-                        code = self._file_content_cache[fpath]
-                    else:
-                        with open(fpath, "r", encoding="utf-8") as fh:
-                            code = fh.read()
-                        self._file_content_cache[fpath] = code
+                    with open(fpath, "r", encoding="utf-8") as fh:
+                        code = fh.read()
                 except Exception:
                     continue
 
                 # --- AST path ---
-                _ast_key = fpath
                 try:
-                    if _ast_key in self._raw_ast_cache:
-                        parsed = self._raw_ast_cache[_ast_key]
-                        if parsed is False:
-                            raise Exception("cached parse failure")
-                    else:
-                        parsed = javalang.parse.parse(code)
-                        self._raw_ast_cache[_ast_key] = parsed
+                    parsed = javalang.parse.parse(code)
                     for _, type_node in parsed.filter(jt.ClassDeclaration):
                         for _, fd in type_node.filter(jt.FieldDeclaration):
                             tname = self._simple_type_name(fd.type)
@@ -1439,7 +1344,11 @@ class JavaAdapter(LanguageAdapter):
 
     def build_method_return_index(self, app_folder: str) -> dict:
         method_return_index = {}
+        # Maps class_name -> simple parent class name (from "extends X").
+        # Stored under the reserved key "__extends__" inside each class entry
+        # so callers can walk the inheritance chain without a separate dict.
         class_decl_pat = re.compile(r'\bclass\s+(\w+)\b')
+        class_extends_pat = re.compile(r'\bclass\s+(\w+)\s+extends\s+(\w+)')
         method_sig_pat = re.compile(
             r'(?:public|protected|private)?\s+(?:static\s+)?([\w\.&lt;<>\[\]]+)\s+(\w+)\s*\(',
             re.MULTILINE,
@@ -1453,28 +1362,16 @@ class JavaAdapter(LanguageAdapter):
                 if not file.endswith(self.file_extension()):
                     continue
                 fpath = os.path.join(root, file)
-                # FIX 3: reuse cached file content and parsed AST
                 try:
-                    if fpath in self._file_content_cache:
-                        code = self._file_content_cache[fpath]
-                    else:
-                        with open(fpath, "r", encoding="utf-8") as f:
-                            code = f.read()
-                        self._file_content_cache[fpath] = code
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        code = f.read()
                 except Exception:
                     continue
 
-                _ast_key2 = fpath
-                if _ast_key2 in self._raw_ast_cache:
-                    _cached2 = self._raw_ast_cache[_ast_key2]
-                    parsed = None if (_cached2 is False) else _cached2
-                else:
-                    try:
-                        parsed = javalang.parse.parse(code)
-                        self._raw_ast_cache[_ast_key2] = parsed
-                    except Exception:
-                        parsed = None
-                        self._raw_ast_cache[_ast_key2] = False
+                try:
+                    parsed = javalang.parse.parse(code)
+                except Exception:
+                    parsed = None
 
                 if parsed:
                     for _, cls in parsed.filter(jt.ClassDeclaration):
@@ -1482,6 +1379,13 @@ class JavaAdapter(LanguageAdapter):
                         if not cls_name:
                             continue
                         method_return_index.setdefault(cls_name, {})
+                        # Record the direct parent class so the service can
+                        # walk the inheritance chain for Case 1.
+                        parent_type = getattr(cls, "extends", None)
+                        if parent_type is not None:
+                            parent_name = getattr(parent_type, "name", None)
+                            if parent_name:
+                                method_return_index[cls_name]["__extends__"] = parent_name
                         for _, m in cls.filter(jt.MethodDeclaration):
                             rt = m.return_type
                             if rt is None:
@@ -1518,6 +1422,10 @@ class JavaAdapter(LanguageAdapter):
                     continue
                 cls_name = cls_match.group(1)
                 method_return_index.setdefault(cls_name, {})
+                # Capture extends from regex as well
+                ext_match = class_extends_pat.search(code)
+                if ext_match and ext_match.group(1) == cls_name:
+                    method_return_index[cls_name]["__extends__"] = ext_match.group(2)
                 for mm in method_sig_pat.finditer(code):
                     return_type = mm.group(1)
                     method_name = mm.group(2)

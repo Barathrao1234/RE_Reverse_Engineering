@@ -2105,14 +2105,33 @@ def method_lineage(
         )
         _pkg_re = re.compile(r'^\s*package\s+([\w.]+)\s*;', re.MULTILINE)
 
+        def _read_cached(fpath):
+            """Return file text from cache, reading from disk if missing."""
+            text = file_content_cache.get(fpath)
+            if text is None:
+                try:
+                    with open(fpath, "r", encoding="utf-8") as _fh:
+                        text = _fh.read()
+                except UnicodeDecodeError:
+                    try:
+                        with open(fpath, "r", encoding="latin-1") as _fh:
+                            text = _fh.read()
+                    except Exception:
+                        text = ""
+                except Exception:
+                    text = ""
+                file_content_cache[fpath] = text
+            return text or ""
+
         # ----- Build fqn_to_path -----
         # type_to_path_full already maps  simple_name -> [path1, path2, ...]
         # For every path in those lists, extract its package declaration and map
         # "package.ClassName" -> file_path so import-based resolution works.
+        # _read_cached ensures files not yet in file_content_cache are read now.
         fqn_to_path = {}
         for _simple, _path_list in type_to_path_full.items():
             for _fpath in _path_list:
-                _text = file_content_cache.get(_fpath, "")
+                _text = _read_cached(_fpath)
                 _pkg_m = _pkg_re.search(_text)
                 _pkg = _pkg_m.group(1) if _pkg_m else ""
                 _fqn = "{}.{}".format(_pkg, _simple) if _pkg else _simple
@@ -2121,9 +2140,11 @@ def method_lineage(
         # ----- Build file_to_imports -----
         # Maps caller_file_path -> { simple_name: fqn }
         # e.g. "/abs/A.java" -> {"OrderService": "com.example.OrderService"}
+        # _read_cached ensures all caller files get imports parsed, even those
+        # that were never added to file_content_cache by the worker result loop.
         file_to_imports = {}
         for _fpath in java_files:
-            _text = file_content_cache.get(_fpath, "")
+            _text = _read_cached(_fpath)
             _imp_map = {}
             for _fqn in _import_re.findall(_text):
                 _simple = _fqn.split(".")[-1]

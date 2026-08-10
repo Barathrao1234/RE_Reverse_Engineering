@@ -1453,7 +1453,19 @@ def method_lineage(
 
             return mapping
 
-        type_to_path_full = build_type_to_path_including_nested(java_files)
+        # Build type_to_path_full from ALL project files (not just BFS-reachable ones).
+        # BFS may miss files that are callee targets not reachable from the seed
+        # controllers. Those classes still appear in class_method_call and need
+        # their file path resolved. Scanning by extension is fast; the function
+        # already uses its regex fallback for files with no cached AST.
+        _ext_tuple = tuple(details.get("extension", [adapter.file_extension()]))
+        _all_project_files = []
+        for _root, _, _fnames in os.walk(app_folder):
+            for _fn in _fnames:
+                if _fn.endswith(_ext_tuple):
+                    _all_project_files.append(os.path.abspath(os.path.join(_root, _fn)))
+
+        type_to_path_full = build_type_to_path_including_nested(_all_project_files)
         loc_cache = {}
 
         def get_method_line_count(
@@ -2125,22 +2137,16 @@ def method_lineage(
             Resolve the file path of `simple_name` as seen from `caller_file`.
 
             Resolution order:
-            1. Look up simple_name in caller's import map → get FQN → fqn_to_path
-            2. If not imported, try same-package resolution
+            1. Check caller's import map → get FQN → fqn_to_path
+               (runs FIRST so explicit imports always win, even when
+                type_to_path_full has zero or multiple entries)
+            2. Try same-package resolution
                (caller's package + simple_name → fqn_to_path)
             3. If only one candidate exists in type_to_path_full, return it
-            4. Fall back to None (caller keeps original string)
+            4. If multiple candidates, return first (already exhausted imports above)
+            5. Fall back to None (caller keeps original string)
             """
-            # type_to_path_full now returns a list of all known paths for this name
-            candidates = type_to_path_full.get(simple_name, [])
-
-            if not candidates:
-                return None
-
-            if len(candidates) == 1:
-                return candidates[0]
-
-            # Multiple candidates — use imports to disambiguate
+            # --- Step 1: explicit import in the caller file ---
             imp_map = file_to_imports.get(caller_file, {})
             fqn = imp_map.get(simple_name)
             if fqn:
@@ -2148,7 +2154,7 @@ def method_lineage(
                 if resolved:
                     return resolved
 
-            # Try same-package: derive package from caller file's own source
+            # --- Step 2: same-package resolution ---
             caller_text = file_content_cache.get(caller_file, "")
             caller_pkg_m = _pkg_re.search(caller_text)
             if caller_pkg_m:
@@ -2158,8 +2164,15 @@ def method_lineage(
                 if resolved:
                     return resolved
 
-            # Last resort: return first candidate
-            return candidates[0]
+            # --- Step 3 & 4: fall back to type_to_path_full ---
+            candidates = type_to_path_full.get(simple_name, [])
+            if len(candidates) == 1:
+                return candidates[0]
+            if len(candidates) > 1:
+                return candidates[0]
+
+            # --- Step 5: not found anywhere ---
+            return None
 
         # ----- Enrichment functions (import-aware) -----
         _base_class_re = re.compile(r'^([A-Za-z_]\w*)\.(.*)', re.DOTALL)
@@ -2171,15 +2184,15 @@ def method_lineage(
             root, _ = os.path.splitext(path_str)
             return root
 
-        def _enrich_call_with_path(call_str, caller_file):
+        def _enrich_call_with_path(call_str, caller_file, fallback_class_name=None):
             """
             Replace the base class/variable token in a call string with the
             resolved file path (extension stripped) of that class.
 
             Handles two cases:
               UpperCase base  — direct class reference  e.g. Payment.method()
-              lowercase base  — variable name; use class_method_call's already-
-                                resolved uppercase base to drive resolution
+              lowercase base  — variable name; resolve via object_class_map first,
+                                then fall back to fallback_class_name if provided.
             """
             if not isinstance(call_str, str):
                 return call_str
@@ -2188,14 +2201,36 @@ def method_lineage(
                 return call_str
             cls_name = m.group(1)
             rest = m.group(2)
-            # Only resolve UpperCamelCase tokens — lowercase are variable names
-            # and cannot be looked up in type_to_path_full directly.
-            if not cls_name[0].isupper():
+
+            if cls_name[0].isupper():
+                # Direct UpperCamelCase class reference — resolve path directly.
+                resolved = _resolve_class_path(cls_name, caller_file)
+                if resolved:
+                    return "{}.{}".format(_strip_extension(resolved), rest)
                 return call_str
-            resolved = _resolve_class_path(cls_name, caller_file)
-            if resolved:
-                return "{}.{}".format(_strip_extension(resolved), rest)
-            return call_str
+            else:
+                # Lowercase variable name — look up its declared type via
+                # object_class_map (scoped to this file first, then global).
+                mapped_cls = (
+                    object_class_map.get((caller_file.lower(), cls_name.lower()))
+                    or object_class_map.get(cls_name.lower())
+                )
+                if mapped_cls:
+                    mapped_cls = strip_generics(mapped_cls)
+                elif fallback_class_name:
+                    # Caller passed an already-resolved UpperCamelCase class name
+                    # (e.g. the base extracted from class_method_call).
+                    mapped_cls = fallback_class_name
+                else:
+                    return call_str
+
+                resolved = _resolve_class_path(mapped_cls, caller_file)
+                if resolved:
+                    return "{}.{}".format(_strip_extension(resolved), rest)
+                # Even if we can't get a full path, at least replace the
+                # variable token with the proper class name so the call is
+                # readable (e.g. "orderService.save()" → "OrderService.save()").
+                return "{}.{}".format(mapped_cls, rest)
 
         # Apply row-wise (caller_file comes from the file_name column)
         _records = df_clean_exploded[
@@ -2210,20 +2245,25 @@ def method_lineage(
             _cmc    = str(_row.get("class_method_call") or "")
             _oc     = str(_row.get("object_call") or "")
 
-            # class_method_call — base is always UpperCamelCase after map_class_method_call
+            # class_method_call — base may be UpperCamelCase (direct class ref)
+            # or a lowercase variable name when _lookup_type fell back to the raw
+            # token.  Pass no fallback here; object_class_map lookup handles it.
             _enriched_cmc.append(_enrich_call_with_path(_cmc, _caller))
 
             # object_call — base may be lowercase variable name.
-            # In that case, borrow the resolved base from class_method_call.
+            # Use the resolved UpperCamelCase base from class_method_call as a
+            # fallback hint so we reuse the same resolution without re-scanning.
             _oc_base = _oc.split(".")[0] if "." in _oc else ""
-            if _oc_base and not _oc_base[0].isupper() and "." in _cmc:
-                _cmc_base = _cmc.split(".")[0]
-                _resolved_base = _resolve_class_path(_cmc_base, _caller)
-                if _resolved_base and "." in _oc:
-                    _oc_rest = _oc.split(".", 1)[1]
-                    _enriched_oc.append("{}.{}".format(_strip_extension(_resolved_base), _oc_rest))
+            if _oc_base and not _oc_base[0].isupper():
+                # Try to borrow the class name that class_method_call resolved to.
+                _enriched_cmc_base = _enriched_cmc[-1].split(".")[0] if "." in _enriched_cmc[-1] else ""
+                # _enriched_cmc_base may already be a path segment (contains os.sep)
+                # so extract just the final stem if so.
+                if os.sep in _enriched_cmc_base or "/" in _enriched_cmc_base:
+                    _fallback = os.path.splitext(os.path.basename(_enriched_cmc_base))[0]
                 else:
-                    _enriched_oc.append(_oc)
+                    _fallback = _enriched_cmc_base if _enriched_cmc_base and _enriched_cmc_base[0].isupper() else None
+                _enriched_oc.append(_enrich_call_with_path(_oc, _caller, fallback_class_name=_fallback))
             else:
                 _enriched_oc.append(_enrich_call_with_path(_oc, _caller))
 

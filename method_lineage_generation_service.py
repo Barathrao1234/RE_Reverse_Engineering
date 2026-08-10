@@ -2152,23 +2152,27 @@ def method_lineage(
                     _imp_map[_simple] = _fqn
             file_to_imports[_fpath] = _imp_map
 
+        # Normalise caller_file keys: file_to_imports is keyed by abspath;
+        # the file_name column may use a different capitalisation or separator.
+        # Build a lower-case abspath lookup so the get() always hits.
+        _fi_lower = {os.path.normcase(os.path.abspath(k)): v
+                     for k, v in file_to_imports.items()}
+        _fc_lower = {os.path.normcase(os.path.abspath(k)): v
+                     for k, v in file_content_cache.items()
+                     if isinstance(k, str)}
+
+        # DEBUG: print what we have for ConstraintViolations
+        _dbg_key = "ConstraintViolations"
+        print(f"[DEBUG-RESOLVE] type_to_path_full['{_dbg_key}'] = {type_to_path_full.get(_dbg_key)}")
+        _dbg_fqns = [k for k in fqn_to_path if _dbg_key in k]
+        print(f"[DEBUG-RESOLVE] fqn_to_path keys with '{_dbg_key}': {_dbg_fqns}")
+
         # ----- Resolver: given caller_file + simple class name → path -----
         def _resolve_class_path(simple_name, caller_file):
-            """
-            Resolve the file path of `simple_name` as seen from `caller_file`.
+            _caller_norm = os.path.normcase(os.path.abspath(caller_file)) if caller_file else ""
 
-            Resolution order:
-            1. Check caller's import map → get FQN → fqn_to_path
-               (runs FIRST so explicit imports always win, even when
-                type_to_path_full has zero or multiple entries)
-            2. Try same-package resolution
-               (caller's package + simple_name → fqn_to_path)
-            3. If only one candidate exists in type_to_path_full, return it
-            4. If multiple candidates, return first (already exhausted imports above)
-            5. Fall back to None (caller keeps original string)
-            """
             # --- Step 1: explicit import in the caller file ---
-            imp_map = file_to_imports.get(caller_file, {})
+            imp_map = _fi_lower.get(_caller_norm, {})
             fqn = imp_map.get(simple_name)
             if fqn:
                 resolved = fqn_to_path.get(fqn)
@@ -2176,7 +2180,7 @@ def method_lineage(
                     return resolved
 
             # --- Step 2: same-package resolution ---
-            caller_text = file_content_cache.get(caller_file, "")
+            caller_text = _fc_lower.get(_caller_norm, "") or file_content_cache.get(caller_file, "")
             caller_pkg_m = _pkg_re.search(caller_text)
             if caller_pkg_m:
                 caller_pkg = caller_pkg_m.group(1)
@@ -2187,12 +2191,15 @@ def method_lineage(
 
             # --- Step 3 & 4: fall back to type_to_path_full ---
             candidates = type_to_path_full.get(simple_name, [])
-            if len(candidates) == 1:
-                return candidates[0]
-            if len(candidates) > 1:
+            if candidates:
                 return candidates[0]
 
-            # --- Step 5: not found anywhere ---
+            # --- Step 5: scan fqn_to_path for any FQN ending with .ClassName ---
+            _suffix = ".{}".format(simple_name)
+            for _fqn, _fpath in fqn_to_path.items():
+                if _fqn.endswith(_suffix):
+                    return _fpath
+
             return None
 
         # ----- Enrichment functions (import-aware) -----

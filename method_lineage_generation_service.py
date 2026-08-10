@@ -1,19 +1,3 @@
-# method_lineage_generation_java8.py
-# Java 8 compatible version.
-#
-# Key differences from the Java 18 version:
-#   - No records, sealed classes, text blocks, switch expressions, or pattern matching.
-#   - No 'var' type-inference handling.
-#   - No union-type syntax in type hints (uses Optional/Tuple/List from typing module).
-#   - find_matching_brace_from, find_next_open_brace_from, etc. use plain int return
-#     types instead of `int | None` (Python 3.10+ union syntax removed).
-#   - All `int | None` return annotations replaced with `Optional[int]`.
-#   - build_type_to_path_including_nested only filters on ClassDeclaration,
-#     InterfaceDeclaration, EnumDeclaration (no RecordDeclaration — Java 8).
-#   - class_regex for LOC does NOT include 'record' as a keyword.
-#   - tuple[int, list[str]] replaced with Tuple[int, List[str]].
-#   - Everything else is functionally identical to the Java 18 version.
-
 import os
 import re
 import html
@@ -28,7 +12,7 @@ from collections import deque
 from tqdm import tqdm
 
 def log_time(message):
-    with open("execution_service    .txt", "a", encoding="utf-8") as f:
+    with open("execution_log_service.txt", "a", encoding="utf-8") as f:
         f.write(f"{datetime.now()} - {message}\n")
 
 
@@ -224,7 +208,7 @@ def _file_worker(args):
 
     def append_row(type_name, type_kind, method_name, meta, call, calls_list):
         local_rows.append({
-            'file_name': file,
+            'file_name': file_path,
             'class_interface_name': type_name,
             'type': type_kind or 'Unknown',
             'method_name': method_name,
@@ -293,7 +277,7 @@ def _file_worker(args):
                 method = rec.get('method_name') or 'UnknownMethod'
                 call = rec.get('object_call') or 'None'
                 local_rows.append({
-                    'file_name': file, 'class_interface_name': type_name,
+                    'file_name': file_path, 'class_interface_name': type_name,
                     'type': row_type, 'method_name': method,
                     'Annotations': "None", 'Method_Declaration_Type': "Default",
                     'return_type': "", 'object_call': call,
@@ -304,7 +288,7 @@ def _file_worker(args):
             filtered_calls = fb.get('filtered_calls', [])
             for call in filtered_calls or ["None"]:
                 local_rows.append({
-                    'file_name': file, 'class_interface_name': type_name,
+                    'file_name': file_path, 'class_interface_name': type_name,
                     'type': row_type, 'method_name': "UnknownMethod",
                     'Annotations': "None", 'Method_Declaration_Type': "Default",
                     'return_type': "", 'object_call': call,
@@ -692,7 +676,7 @@ def method_lineage(
                         file_content_cache[_file_path] = read_file_cached(_file_path)
                     except Exception:
                         pass
-                file_map.setdefault(_type_name, _file)
+                file_map.setdefault(_type_name, _file_path)
                 method_map.setdefault(_type_name, {})
                 method_map[_type_name][_method_name] = _calls
                 ast_results.append(_row)
@@ -1422,8 +1406,17 @@ def method_lineage(
             files are never parsed more than once per run.  Falls back to a
             fast regex scan for files that failed to parse with javalang
             (saves a second parse attempt per failing file).
+
+            Returns: dict of  simple_name -> [path1, path2, ...]
+            All paths are kept so that the import-based resolver can
+            disambiguate when the same class name exists in multiple packages.
             """
-            mapping = {}
+            mapping = {}   # simple_name -> [abs_path, ...]
+
+            def _add(name, fpath):
+                mapping.setdefault(name, [])
+                if fpath not in mapping[name]:
+                    mapping[name].append(fpath)
 
             declaration_types = (
                 javalang.tree.ClassDeclaration,
@@ -1451,17 +1444,17 @@ def method_lineage(
                         name = getattr(decl, "name", None)
                         if not name:
                             continue
-                        mapping.setdefault(name, fpath)
+                        _add(name, fpath)
                         if name.endswith("Impl"):
-                            mapping.setdefault(name[:-4], fpath)
+                            _add(name[:-4], fpath)
                 else:
                     # AST unavailable — use regex on cached text (no extra I/O)
                     text = file_content_cache.get(fpath, "")
                     for m in _decl_re.finditer(text):
                         name = m.group(1)
-                        mapping.setdefault(name, fpath)
+                        _add(name, fpath)
                         if name.endswith("Impl"):
-                            mapping.setdefault(name[:-4], fpath)
+                            _add(name[:-4], fpath)
 
             return mapping
 
@@ -1529,8 +1522,8 @@ def method_lineage(
 
                 print(
                     "Neither {} nor {} found".format(
-                        "{}{}".format(classname, details_cfg.get('extension', '.java')),
-                        "{}Impl{}".format(classname, details_cfg.get('extension', '.java'))
+                        "{}{}".format(classname, extension),
+                        "{}Impl{}".format(classname, extension)
                     )
                 )
                 return None
@@ -2007,7 +2000,18 @@ def method_lineage(
             if methodname.lower() in SYSTEM_METHODS:
                 return None
 
-            java_file_path = type_to_path_full.get(classname)
+            # After enrichment, class_interface_name is a path WITHOUT extension
+            # e.g. "/abs/path_1/Order" or "path_2/Payment".
+            # Detect by presence of a path separator.
+            if os.sep in classname or "/" in classname:
+                # Re-attach the source extension to get the actual file path
+                extension = details.get("extension", [".java"])[0]
+                java_file_path = classname + extension
+                # Simple class name is the final component (stem)
+                classname = os.path.basename(classname)
+            else:
+                candidates = type_to_path_full.get(classname, [])
+                java_file_path = candidates[0] if candidates else None
 
             return get_method_line_count(
                 details_cfg=details,
@@ -2079,21 +2083,179 @@ def method_lineage(
             if col in df_clean_exploded.columns:
                 df_clean_exploded[col] = df_clean_exploded[col].apply(_strip_parens_preserve).apply(_unescape_html)
 
+        # ============================================================
+        # IMPORT-BASED PATH RESOLUTION
+        # ============================================================
+        # type_to_path_full now maps  ClassName -> [path1, path2, ...]
+        # For disambiguation we need two more indexes:
+        #   fqn_to_path   : "com.example.OrderService" -> "/abs/path/OrderService.java"
+        #   file_to_imports: "/abs/caller.java"        -> {"OrderService": "com.example.OrderService"}
+        # ============================================================
+
+        _import_re = re.compile(
+            r'^\s*import\s+(?:static\s+)?([\w.]+)\s*;',
+            re.MULTILINE
+        )
+        _pkg_re = re.compile(r'^\s*package\s+([\w.]+)\s*;', re.MULTILINE)
+
+        # ----- Build fqn_to_path -----
+        # type_to_path_full already maps  simple_name -> [path1, path2, ...]
+        # For every path in those lists, extract its package declaration and map
+        # "package.ClassName" -> file_path so import-based resolution works.
+        fqn_to_path = {}
+        for _simple, _path_list in type_to_path_full.items():
+            for _fpath in _path_list:
+                _text = file_content_cache.get(_fpath, "")
+                _pkg_m = _pkg_re.search(_text)
+                _pkg = _pkg_m.group(1) if _pkg_m else ""
+                _fqn = "{}.{}".format(_pkg, _simple) if _pkg else _simple
+                fqn_to_path.setdefault(_fqn, _fpath)
+
+        # ----- Build file_to_imports -----
+        # Maps caller_file_path -> { simple_name: fqn }
+        # e.g. "/abs/A.java" -> {"OrderService": "com.example.OrderService"}
+        file_to_imports = {}
+        for _fpath in java_files:
+            _text = file_content_cache.get(_fpath, "")
+            _imp_map = {}
+            for _fqn in _import_re.findall(_text):
+                _simple = _fqn.split(".")[-1]
+                if _simple and _simple != "*":
+                    _imp_map[_simple] = _fqn
+            file_to_imports[_fpath] = _imp_map
+
+        # ----- Resolver: given caller_file + simple class name → path -----
+        def _resolve_class_path(simple_name, caller_file):
+            """
+            Resolve the file path of `simple_name` as seen from `caller_file`.
+
+            Resolution order:
+            1. Look up simple_name in caller's import map → get FQN → fqn_to_path
+            2. If not imported, try same-package resolution
+               (caller's package + simple_name → fqn_to_path)
+            3. If only one candidate exists in type_to_path_full, return it
+            4. Fall back to None (caller keeps original string)
+            """
+            # type_to_path_full now returns a list of all known paths for this name
+            candidates = type_to_path_full.get(simple_name, [])
+
+            if not candidates:
+                return None
+
+            if len(candidates) == 1:
+                return candidates[0]
+
+            # Multiple candidates — use imports to disambiguate
+            imp_map = file_to_imports.get(caller_file, {})
+            fqn = imp_map.get(simple_name)
+            if fqn:
+                resolved = fqn_to_path.get(fqn)
+                if resolved:
+                    return resolved
+
+            # Try same-package: derive package from caller file's own source
+            caller_text = file_content_cache.get(caller_file, "")
+            caller_pkg_m = _pkg_re.search(caller_text)
+            if caller_pkg_m:
+                caller_pkg = caller_pkg_m.group(1)
+                same_pkg_fqn = "{}.{}".format(caller_pkg, simple_name)
+                resolved = fqn_to_path.get(same_pkg_fqn)
+                if resolved:
+                    return resolved
+
+            # Last resort: return first candidate
+            return candidates[0]
+
+        # ----- Enrichment functions (import-aware) -----
+        _base_class_re = re.compile(r'^([A-Za-z_]\w*)\.(.*)', re.DOTALL)
+
+        def _strip_extension(path_str):
+            """Remove file extension from a path string e.g. /a/b/Order.java -> /a/b/Order"""
+            if not isinstance(path_str, str):
+                return path_str
+            root, _ = os.path.splitext(path_str)
+            return root
+
+        def _enrich_call_with_path(call_str, caller_file):
+            """
+            Replace the base class/variable token in a call string with the
+            resolved file path (extension stripped) of that class.
+
+            Handles two cases:
+              UpperCase base  — direct class reference  e.g. Payment.method()
+              lowercase base  — variable name; use class_method_call's already-
+                                resolved uppercase base to drive resolution
+            """
+            if not isinstance(call_str, str):
+                return call_str
+            m = _base_class_re.match(call_str.strip())
+            if not m:
+                return call_str
+            cls_name = m.group(1)
+            rest = m.group(2)
+            # Only resolve UpperCamelCase tokens — lowercase are variable names
+            # and cannot be looked up in type_to_path_full directly.
+            if not cls_name[0].isupper():
+                return call_str
+            resolved = _resolve_class_path(cls_name, caller_file)
+            if resolved:
+                return "{}.{}".format(_strip_extension(resolved), rest)
+            return call_str
+
+        # Apply row-wise (caller_file comes from the file_name column)
+        _records = df_clean_exploded[
+            ["file_name", "object_call", "class_method_call"]
+        ].to_dict("records")
+
+        _enriched_oc  = []
+        _enriched_cmc = []
+
+        for _row in _records:
+            _caller = str(_row.get("file_name") or "")
+            _cmc    = str(_row.get("class_method_call") or "")
+            _oc     = str(_row.get("object_call") or "")
+
+            # class_method_call — base is always UpperCamelCase after map_class_method_call
+            _enriched_cmc.append(_enrich_call_with_path(_cmc, _caller))
+
+            # object_call — base may be lowercase variable name.
+            # In that case, borrow the resolved base from class_method_call.
+            _oc_base = _oc.split(".")[0] if "." in _oc else ""
+            if _oc_base and not _oc_base[0].isupper() and "." in _cmc:
+                _cmc_base = _cmc.split(".")[0]
+                _resolved_base = _resolve_class_path(_cmc_base, _caller)
+                if _resolved_base and "." in _oc:
+                    _oc_rest = _oc.split(".", 1)[1]
+                    _enriched_oc.append("{}.{}".format(_strip_extension(_resolved_base), _oc_rest))
+                else:
+                    _enriched_oc.append(_oc)
+            else:
+                _enriched_oc.append(_enrich_call_with_path(_oc, _caller))
+
+        # class_interface_name = the caller's own class, whose file is already
+        # known from file_name. No import resolution needed — just strip extension.
+        df_clean_exploded["class_interface_name"] = (
+            df_clean_exploded["file_name"].apply(_strip_extension)
+        )
+        df_clean_exploded["object_call"]          = _enriched_oc
+        df_clean_exploded["class_method_call"]    = _enriched_cmc
+
         df_application_properties = adapter.extract_application_properties_from_folder(app_folder)
 
-        if not os.path.exists(all_methods):
-            with pd.ExcelWriter(all_methods, engine="openpyxl", mode="w") as writer:
+        excel_path = os.path.join(OUTPUT_DIR,all_methods)
+        if not os.path.exists(excel_path):
+            with pd.ExcelWriter(excel_path, engine="openpyxl", mode="w") as writer:
                 pd.DataFrame({"init": []}).to_excel(writer, sheet_name="Init", index=False)
 
         _pbar.set_postfix_str("Writing Excel...")
-        with pd.ExcelWriter(all_methods, engine="xlsxwriter") as writer:
+        with pd.ExcelWriter(excel_path, engine="xlsxwriter") as writer:
             df_clean_exploded.to_excel(writer,sheet_name="Cleaned_AST_Details",index=False)
             df_application_properties.to_excel(writer,sheet_name="application.properties",index=False)
 
         # ── Checkpoint 100% ──
-        _pbar_goto(100, f"Done -> {os.path.basename(all_methods)}")
+        _pbar_goto(100, f"Done -> {os.path.basename(excel_path)}")
         _pbar.close()
-        return os.path.abspath(all_methods)
+        return os.path.abspath(excel_path)
 
     df_results = pd.DataFrame(
         ast_results,

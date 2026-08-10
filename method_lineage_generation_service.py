@@ -545,17 +545,12 @@ def method_lineage(
     log_time(f"BFS complete: {len(java_files)} reachable files from {len(controller_files or [])} controller(s)")
 
     # -----------------------------------------------------------
-    # Copy all reachable Java files flat into OUTPUT_DIR/reachable_sources/
+    # reachable_sources is populated after clean_and_write,
+    # using the resolved paths in class_method_call (see below).
     # -----------------------------------------------------------
     import shutil
     _sources_dir = os.path.join(OUTPUT_DIR, "reachable_sources")
     os.makedirs(_sources_dir, exist_ok=True)
-    for _fp in java_files:
-        try:
-            shutil.copy2(_fp, os.path.join(_sources_dir, os.path.basename(_fp)))
-        except Exception as _copy_err:
-            log_time(f"Could not copy {_fp}: {_copy_err}")
-    log_time(f"Copied {len(java_files)} reachable source files to {_sources_dir}")
 
     # Build O(1) filename → path lookup (used by LOC resolver later)
     for _fp in java_files:
@@ -2239,6 +2234,64 @@ def method_lineage(
         )
         df_clean_exploded["object_call"]          = _enriched_oc
         df_clean_exploded["class_method_call"]    = _enriched_cmc
+
+        # -----------------------------------------------------------
+        # Copy callee source files into reachable_sources.
+        # class_method_call after enrichment has the form:
+        #   "path/to/ClassName.methodName()"
+        # The base (everything before the first ".method") is the
+        # extension-stripped file path of the callee.  Re-attach the
+        # configured source extension and copy each unique file.
+        # This is the definitive copy — driven by the correctly resolved
+        # paths, not by the early BFS which used setdefault and could
+        # pick the wrong file when the same class name existed in multiple
+        # packages.
+        # -----------------------------------------------------------
+        _ext = details.get("extension", [".java"])[0]
+
+        def _cmc_to_filepath(cmc):
+            """
+            Extract the file path from an enriched class_method_call string.
+            e.g. "/abs/path_2/Payment.method()" -> "/abs/path_2/Payment.java"
+            The base path is everything up to (but not including) the last
+            dot-separated token that looks like a method name.
+            """
+            if not isinstance(cmc, str):
+                return None
+            # Split on "." and drop the last token (method name)
+            # e.g. "/abs/path_2/Payment.method()" -> ["/abs/path_2/Payment", "method()"]
+            parts = cmc.split(".")
+            if len(parts) < 2:
+                return None
+            base = ".".join(parts[:-1])   # everything except the method token
+            # Only treat as a path if it contains a path separator
+            if os.sep not in base and "/" not in base:
+                return None
+            return base + _ext
+
+        _cmc_paths = (
+            df_clean_exploded["class_method_call"]
+            .dropna()
+            .apply(_cmc_to_filepath)
+            .dropna()
+            .unique()
+        )
+
+        # Also include the caller files (file_name column)
+        _caller_paths = df_clean_exploded["file_name"].dropna().unique()
+
+        _all_paths_to_copy = set(_cmc_paths) | set(_caller_paths)
+
+        _copied = 0
+        for _fp in _all_paths_to_copy:
+            if os.path.isfile(_fp):
+                try:
+                    shutil.copy2(_fp, os.path.join(_sources_dir, os.path.basename(_fp)))
+                    _copied += 1
+                except Exception as _copy_err:
+                    log_time(f"Could not copy {_fp}: {_copy_err}")
+
+        log_time(f"Copied {_copied} source files to {_sources_dir} (from class_method_call paths)")
 
         df_application_properties = adapter.extract_application_properties_from_folder(app_folder)
 

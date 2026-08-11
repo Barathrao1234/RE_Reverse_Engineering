@@ -783,12 +783,12 @@ def generate_method_level_hierarchy(
                 print(f"         '{v.lower()}'")
             # ─────────────────────────────────────────────────────────────────
 
-        start_nodes = (
+        start_nodes = list(
             df_match[['classname', 'methodname']]
             .drop_duplicates()
             .itertuples(index=False, name=None)
         )
-        print("start_nodes of ctrl", ctrl, ":", list(start_nodes))
+        print("start_nodes of ctrl", ctrl, ":", start_nodes)
 
         for classname, methodname in start_nodes:
             print("classname :", classname, "methodname:", methodname)

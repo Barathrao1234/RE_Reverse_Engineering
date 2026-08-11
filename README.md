@@ -1,7 +1,10 @@
-print(f"[DEBUG] java_files found by BFS : {len(java_files)}")
-print(f"[DEBUG] ast_results rows        : {len(ast_results)}")
-print(f"[DEBUG] method_map classes      : {len(method_map)}")
-print(f"[DEBUG] errors from parsing     : {len(errors)}")
-if errors:
-    for e in errors[:5]:  # show first 5 errors
-        print(f"  ERROR: {e}")
+# ── DEBUG ──
+print(f"[DEBUG] _all_project_files_early count: {len(_all_project_files_early)}")
+print(f"[DEBUG] type_to_path_full_early count: {len(type_to_path_full_early)}")
+print(f"[DEBUG] RequestDetails in type_to_path_full_early: {type_to_path_full_early.get('RequestDetails')}")
+print(f"[DEBUG] SearchPeriod in type_to_path_full_early: {type_to_path_full_early.get('SearchPeriod')}")
+
+# Check if the file even exists in the walk
+for _fp in _all_project_files_early:
+    if 'RequestDetails' in os.path.basename(_fp):
+        print(f"[DEBUG] Found file matching RequestDetails: {_fp}")

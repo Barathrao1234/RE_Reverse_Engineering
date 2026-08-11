@@ -313,6 +313,23 @@ def read_ast_and_build_graph(excel_path, sheet_name="Cleaned_AST_Details"):
     class_method_map = {k: list(v) for k, v in class_method_map.items()}
     method_map = {k: list(v) for k, v in method_map.items()}
 
+    # ── DEBUG ──────────────────────────────────────────────────────────────────
+    print("\n[DEBUG] === read_ast_and_build_graph ===")
+    print(f"[DEBUG] df_orig shape: {df_orig.shape}")
+    print(f"[DEBUG] df_orig columns: {list(df_orig.columns)}")
+    print("[DEBUG] Sample classname values (first 3):")
+    for v in df_orig['classname'].head(3):
+        print(f"         '{v}'")
+    print("[DEBUG] Sample methodname values (first 3):")
+    for v in df_orig['methodname'].head(3):
+        print(f"         '{v}'")
+    print("[DEBUG] Sample class_method_call values (first 3):")
+    for v in df_orig['class_method_call'].head(3):
+        print(f"         '{v}'")
+    print(f"[DEBUG] class_method_map keys (first 5): {list(class_method_map.keys())[:5]}")
+    print(f"[DEBUG] method_to_row will be built from {len(df_orig)} rows")
+    # ──────────────────────────────────────────────────────────────────────────
+
     graph = defaultdict(list)
     method_to_nodes = defaultdict(list)
     filebase_to_nodes = defaultdict(list)
@@ -351,6 +368,10 @@ def read_ast_and_build_graph(excel_path, sheet_name="Cleaned_AST_Details"):
         key = (row['classname'].lower(), row['methodname'].lower())
         if key not in method_to_row:
             method_to_row[key] = row
+
+    # ── DEBUG ──────────────────────────────────────────────────────────────────
+    print(f"[DEBUG] method_to_row keys (first 5): {list(method_to_row.keys())[:5]}")
+    # ──────────────────────────────────────────────────────────────────────────
 
     return df_orig, class_method_map, method_map, graph, filebase_to_nodes, method_to_row
 
@@ -424,6 +445,13 @@ def expand_lineage_horizontal(
 
     key = (classname.lower(), methodname.lower())
     orig_row = method_to_row.get(key)
+
+    # ── DEBUG ──────────────────────────────────────────────────────────────────
+    print(f"[DEBUG expand] classname='{classname}' methodname='{methodname}'")
+    print(f"[DEBUG expand] method_to_row key='{key}' found={orig_row is not None}")
+    if orig_row is None and depth == 0:
+        print(f"[DEBUG expand] method_to_row all keys (first 5): {list(method_to_row.keys())[:5]}")
+    # ──────────────────────────────────────────────────────────────────────────
 
     # ---------- External / unresolved method ----------
     if orig_row is None:
@@ -726,24 +754,62 @@ def generate_method_level_hierarchy(
         ctrl_no_ext = os.path.splitext(ctrl)[0]   # strips .java if accidentally present
         ctrl_lower  = ctrl_no_ext.lower()
 
+        # ── DEBUG ──────────────────────────────────────────────────────────────
+        print(f"\n[DEBUG] === Traversal for ctrl ===")
+        print(f"[DEBUG] ctrl raw       : '{ctrl}'")
+        print(f"[DEBUG] ctrl_no_ext    : '{ctrl_no_ext}'")
+        print(f"[DEBUG] ctrl_lower     : '{ctrl_lower}'")
+        print(f"[DEBUG] df_orig classname sample (lower, first 3):")
+        for v in df_orig['classname'].head(3):
+            print(f"         '{v.lower()}'")
+        # ──────────────────────────────────────────────────────────────────────
+
         # Primary match: classname column (full path without ext, case-insensitive)
         df_match = df_orig[df_orig['classname'].str.lower() == ctrl_lower]
+
+        # ── DEBUG ──────────────────────────────────────────────────────────────
+        print(f"[DEBUG] df_match after classname match: {len(df_match)} rows")
+        # ──────────────────────────────────────────────────────────────────────
 
         # Fallback: file_name_without_ext (also full path without ext)
         if df_match.empty:
             df_match = df_orig[
                 df_orig['file_name_without_ext'].str.lower() == ctrl_lower
             ]
+            # ── DEBUG ────────────────────────────────────────────────────────
+            print(f"[DEBUG] df_match after file_name_without_ext fallback: {len(df_match)} rows")
+            print(f"[DEBUG] file_name_without_ext sample (lower, first 3):")
+            for v in df_orig['file_name_without_ext'].head(3):
+                print(f"         '{v.lower()}'")
+            # ─────────────────────────────────────────────────────────────────
 
         start_nodes = (
             df_match[['classname', 'methodname']]
             .drop_duplicates()
             .itertuples(index=False, name=None)
         )
-        print("start_nodes of ctrl",ctrl,":",list(start_nodes))
+        print("start_nodes of ctrl", ctrl, ":", list(start_nodes))
 
         for classname, methodname in start_nodes:
-            print("classname :",classname,"methodname:",methodname)
+            print("classname :", classname, "methodname:", methodname)
+
+            # ── DEBUG ──────────────────────────────────────────────────────────
+            key = (classname.lower(), methodname.lower())
+            print(f"[DEBUG] method_to_row lookup key : {key}")
+            print(f"[DEBUG] key found in method_to_row: {key in method_to_row}")
+            print(f"[DEBUG] class_method_map lookup key: ('{classname}', '{methodname}')")
+            cm_hit = class_method_map.get((classname, methodname), None)
+            print(f"[DEBUG] class_method_map direct hit: {cm_hit}")
+            ci_hit = next(
+                (v for (c, m), v in class_method_map.items()
+                 if c.lower() == classname.lower() and m.lower() == methodname.lower()),
+                None
+            )
+            print(f"[DEBUG] class_method_map case-insensitive hit: {ci_hit}")
+            print(f"[DEBUG] method_line_map lookup key: {key}")
+            print(f"[DEBUG] method_line_map hit: {method_line_map.get(key, 'NOT FOUND')}")
+            # ──────────────────────────────────────────────────────────────────
+
             paths = expand_lineage_horizontal(
                 classname, methodname,
                 class_method_map, method_map,

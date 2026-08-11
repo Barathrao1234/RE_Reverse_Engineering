@@ -1,3 +1,4 @@
+
 # import os
 # import re
 # import html
@@ -2955,6 +2956,36 @@ def method_lineage(
                 return _get_return_type(parent, method_name, _visited)
             return None
 
+        _method_decl_re_cache = {}
+
+        def _method_exists_in_class(class_name, method_name):
+            """
+            Check whether method_name exists in class_name:
+            1. method_return_index (fastest)
+            2. type_to_path_full_early -> source file scan (fallback for classes
+               whose return types are missing/empty in the index)
+            """
+            if not class_name or not method_name:
+                return False
+            owning = _resolve_class_for_method(class_name, method_name)
+            if method_name in method_return_index.get(owning, {}):
+                return True
+            if method_name not in _method_decl_re_cache:
+                _method_decl_re_cache[method_name] = re.compile(
+                    r'\b' + re.escape(method_name) + r'\s*\(', re.MULTILINE
+                )
+            pat = _method_decl_re_cache[method_name]
+            for fpath in type_to_path_full_early.get(class_name, []):
+                text = file_content_cache.get(fpath) or ""
+                if not text:
+                    try:
+                        text = read_file_cached(fpath)
+                    except Exception:
+                        continue
+                if pat.search(text):
+                    return True
+            return False
+
         # ------------------------------------------------------------------
         # Case 2 helper — field-access chain resolution
         # ------------------------------------------------------------------
@@ -3124,14 +3155,54 @@ def method_lineage(
             methods = [first_method] + remaining_methods
 
             chain_render = []
-            for m in methods:
+            for i, m in enumerate(methods):
                 owning_class = _normalize_owner_class_for_member(current_class, m)
                 owning_class = _resolve_class_for_method(strip_generics(owning_class), m)
                 chain_render.append("{}.{}()".format(strip_generics(owning_class), m))
-                ret_type = _get_return_type(owning_class, m)
-                if not ret_type:
+
+                if i == len(methods) - 1:
                     break
-                current_class = strip_generics(str(ret_type).split('.')[-1])
+
+                next_m = methods[i + 1]
+
+                # Step 1: index lookup (inheritance-aware)
+                ret_type = _get_return_type(owning_class, m)
+                if ret_type:
+                    next_class = strip_generics(str(ret_type).split('.')[-1])
+                    if _method_exists_in_class(next_class, next_m):
+                        current_class = next_class
+                        continue
+                    break
+
+                # Step 2: file-based return type extraction
+                ret_from_file = None
+                _ret_decl_re2 = re.compile(
+                    r'\b([A-Za-z_]\w*(?:<[^>]+>)?)\s+' + re.escape(m) + r'\s*\(',
+                    re.MULTILINE
+                )
+                for fpath in type_to_path_full_early.get(strip_generics(owning_class), []):
+                    text = file_content_cache.get(fpath) or ""
+                    if not text:
+                        try:
+                            text = read_file_cached(fpath)
+                        except Exception:
+                            continue
+                    fm = _ret_decl_re2.search(text)
+                    if fm:
+                        candidate = strip_generics(fm.group(1))
+                        if candidate.lower() not in ('void', 'public', 'private',
+                                                     'protected', 'static', 'final',
+                                                     'return', 'new', 'boolean',
+                                                     'int', 'long', 'double', 'float',
+                                                     'string', 'object'):
+                            ret_from_file = candidate
+                            break
+
+                if ret_from_file and _method_exists_in_class(ret_from_file, next_m):
+                    current_class = ret_from_file
+                    continue
+
+                break
             return ".".join(chain_render)
 
 
@@ -3152,6 +3223,73 @@ def method_lineage(
         df_clean["class_method_call"] = df_clean["class_method_call"].astype(str).str.replace(
             r'\s*&amp;lt;[^&amp;gt]+&amp;gt;\s*', '', regex=True
         ).str.replace(r'\s*<[^>]+>\s*', '', regex=True)
+
+        # ------------------------------------------------------------------
+        # Build type_to_path_full EARLY so derive_chain_segments can use it
+        # to resolve method_2's class when method_return_index misses.
+        # ------------------------------------------------------------------
+        def _build_type_to_path_including_nested_early(source_files):
+            mapping = {}
+
+            def _add(name, fpath):
+                mapping.setdefault(name, [])
+                if fpath not in mapping[name]:
+                    mapping[name].append(fpath)
+
+            _decl_re_early = re.compile(
+                r'\b(?:class|interface|enum)\s+([A-Za-z_]\w*)',
+                re.MULTILINE,
+            )
+            try:
+                import javalang as _jl
+                declaration_types_early = (
+                    _jl.tree.ClassDeclaration,
+                    _jl.tree.InterfaceDeclaration,
+                    _jl.tree.EnumDeclaration,
+                )
+            except Exception:
+                _jl = None
+                declaration_types_early = ()
+
+            for fpath in source_files:
+                if fpath not in file_content_cache:
+                    try:
+                        _ = read_file_cached(fpath)
+                    except Exception:
+                        file_content_cache[fpath] = ""
+
+                tree = raw_ast_cache.get(fpath)
+                if tree is None:
+                    try:
+                        tree = parse_raw_ast_cached(fpath)
+                    except Exception:
+                        tree = False
+                        raw_ast_cache[fpath] = tree
+
+                if tree and tree is not False and _jl and declaration_types_early:
+                    for _, decl in tree.filter(declaration_types_early):
+                        name = getattr(decl, "name", None)
+                        if name:
+                            _add(name, fpath)
+                            if name.endswith("Impl"):
+                                _add(name[:-4], fpath)
+                else:
+                    text = file_content_cache.get(fpath, "")
+                    for _m in _decl_re_early.finditer(text):
+                        name = _m.group(1)
+                        _add(name, fpath)
+                        if name.endswith("Impl"):
+                            _add(name[:-4], fpath)
+            return mapping
+
+        _ext_tuple_early = tuple(details.get("extension", [adapter.file_extension()]))
+        _all_project_files_early = []
+        for _root_e, _, _fnames_e in os.walk(app_folder):
+            for _fn_e in _fnames_e:
+                if _fn_e.endswith(_ext_tuple_early):
+                    _all_project_files_early.append(os.path.abspath(os.path.join(_root_e, _fn_e)))
+
+        type_to_path_full_early = _build_type_to_path_including_nested_early(_all_project_files_early)
 
         def derive_chain_segments(obj_call, parent_class, file_name):
             if not isinstance(obj_call, str) or obj_call.strip() == "":
@@ -3192,14 +3330,61 @@ def method_lineage(
             methods = [first_method] + remaining_methods
 
             segments = []
-            for mtd in methods:
+            for i, mtd in enumerate(methods):
                 owning_class = _normalize_owner_class_for_member(current_class, mtd)
                 owning_class = _resolve_class_for_method(strip_generics(owning_class), mtd)
                 segments.append("{}.{}()".format(strip_generics(owning_class), mtd))
-                ret_type = _get_return_type(owning_class, mtd)
-                if not ret_type:
+
+                # No next method — nothing more to resolve
+                if i == len(methods) - 1:
                     break
-                current_class = strip_generics(str(ret_type).split(".")[-1])
+
+                next_mtd = methods[i + 1]
+
+                # Step 1: try method_return_index (inheritance-aware)
+                ret_type = _get_return_type(owning_class, mtd)
+                if ret_type:
+                    next_class = strip_generics(str(ret_type).split(".")[-1])
+                    # Step 2: confirm next_mtd exists in next_class
+                    if _method_exists_in_class(next_class, next_mtd):
+                        current_class = next_class
+                        continue
+                    # next_class doesn't have the method — stop chain
+                    break
+
+                # Step 2 fallback: index missing return type — scan the source file
+                # for the declaration: "public ReturnType methodName("
+                ret_from_file = None
+                _ret_decl_re = re.compile(
+                    r'\b([A-Za-z_]\w*(?:<[^>]+>)?)\s+' + re.escape(mtd) + r'\s*\(',
+                    re.MULTILINE
+                )
+                for fpath in type_to_path_full_early.get(strip_generics(owning_class), []):
+                    text = file_content_cache.get(fpath) or ""
+                    if not text:
+                        try:
+                            text = read_file_cached(fpath)
+                        except Exception:
+                            continue
+                    fm = _ret_decl_re.search(text)
+                    if fm:
+                        candidate = strip_generics(fm.group(1))
+                        if candidate.lower() not in ('void', 'public', 'private',
+                                                     'protected', 'static', 'final',
+                                                     'return', 'new', 'boolean',
+                                                     'int', 'long', 'double', 'float',
+                                                     'string', 'object'):
+                            ret_from_file = candidate
+                            break
+
+                if ret_from_file:
+                    # Verify next_mtd actually lives in ret_from_file's class
+                    if _method_exists_in_class(ret_from_file, next_mtd):
+                        current_class = ret_from_file
+                        continue
+
+                # Cannot determine the next class — stop chain
+                break
             return segments
 
         def explode_cleaned_ast_details(df_clean_local):

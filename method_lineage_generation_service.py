@@ -1,3 +1,2117 @@
+# import os
+# import re
+# import html
+# import json
+# import javalang
+# import pandas as pd
+# from typing import Optional, Tuple, List
+# from datetime import datetime
+# import concurrent.futures
+# import multiprocessing
+# from collections import deque
+# from tqdm import tqdm
+
+# def log_time(message):
+#     with open("execution_log_service.txt", "a", encoding="utf-8") as f:
+#         f.write(f"{datetime.now()} - {message}\n")
+
+
+# class LanguageAdapter:
+#     """
+#     Base interface for language-specific adapters.
+#     Concrete adapters (Java8Adapter, etc.) must implement these methods.
+#     """
+#     def configure(self, *, details, regex,
+#                   include_unqualified=True,
+#                   accept_local_new_types=True,
+#                   accept_parameter_types=True,
+#                   accept_same_package=True,
+#                   file_content_cache=None,
+#                   raw_ast_cache=None):
+#         self.details = details
+#         self.regex = regex
+#         self.include_unqualified = include_unqualified
+#         self.accept_local_new_types = accept_local_new_types
+#         self.accept_parameter_types = accept_parameter_types
+#         self.accept_same_package = accept_same_package
+#         # Shared caches so adapter index-builders never re-read a file
+#         self._file_content_cache = file_content_cache if file_content_cache is not None else {}
+#         self._raw_ast_cache = raw_ast_cache if raw_ast_cache is not None else {}
+
+#     def file_extension(self):
+#         raise NotImplementedError
+
+#     def parse_ast(self, code):
+#         raise NotImplementedError
+
+#     def get_declared_types(self, ast):
+#         raise NotImplementedError
+
+#     def get_methods_in_type(self, type_node):
+#         raise NotImplementedError
+
+#     def extract_method_metadata(self, method_node):
+#         raise NotImplementedError
+
+#     def find_calls_in_method(self, type_node, method_node, code):
+#         raise NotImplementedError
+
+#     def fallback_parse(self, code_raw):
+#         raise NotImplementedError
+
+#     def is_system_call(self, call):
+#         raise NotImplementedError
+
+#     def language_keywords(self):
+#         raise NotImplementedError
+
+#     def build_object_class_map(self, app_folder):
+#         raise NotImplementedError
+
+#     def build_method_return_index(self, app_folder):
+#         raise NotImplementedError
+
+#     def find_type_to_file_map(self, app_folder):
+#         raise NotImplementedError
+
+#     def extract_method_loc(self, file_path, method_name):
+#         raise NotImplementedError
+
+#     def extract_application_properties_from_folder(self, app_folder):
+#         raise NotImplementedError
+
+
+# # ---------------------------------------------------------------------------
+# # Module-level helpers
+# # ---------------------------------------------------------------------------
+
+# def strip_top_level_comments(code):
+#     """
+#     Remove top-level comments (// ... and /* ... */) but leave comments
+#     inside method/class bodies untouched.
+#     """
+#     code = re.sub(r'^\s*//.*$', '', code, flags=re.M)
+
+#     def replacer(match):
+#         if '{' not in match.group(0) and '}' not in match.group(0):
+#             return ''
+#         return match.group(0)
+
+#     code = re.sub(r'/\*.*?\*/', replacer, code, flags=re.S)
+#     return code
+
+
+# def is_commented_declaration(code, line_no):
+#     """
+#     Return True if the line corresponding to line_no is fully commented out.
+#     """
+#     lines = code.splitlines()
+#     if line_no < 0 or line_no >= len(lines):
+#         return False
+#     line = lines[line_no].strip()
+#     return line.startswith("//") or line.startswith("/*") or line.startswith("*")
+
+
+# def is_declaration_line_commented(src, decl_start_idx):
+#     """
+#     Return True if the line where decl_start_idx occurs is commented out.
+#     """
+#     line_start = src.rfind('\n', 0, decl_start_idx) + 1
+#     line = src[line_start: src.find('\n', line_start)]
+#     stripped = line.lstrip()
+
+#     if stripped.startswith("//"):
+#         return True
+
+#     before = src[:decl_start_idx]
+#     last_block_start = before.rfind("/*")
+#     last_block_end = before.rfind("*/")
+
+#     if last_block_start != -1 and last_block_end < last_block_start:
+#         return True
+
+#     return False
+
+
+# def _strip_comments_and_literals(text):
+#     if not isinstance(text, str):
+#         return ""
+#     return re.sub(
+#         r'//.*?$|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])\'',
+#         '',
+#         text,
+#         flags=re.MULTILINE | re.DOTALL
+#     )
+
+
+
+
+# # ---------------------------------------------------------------------------
+# # Main entry point
+# # ---------------------------------------------------------------------------
+
+# # ---------------------------------------------------------------------------
+# # Module-level worker for ProcessPoolExecutor
+# # Must be at module level (not a closure) so it can be pickled.
+# # ---------------------------------------------------------------------------
+
+# def _file_worker(args):
+#     """
+#     Process one Java source file in a subprocess.
+#     args = (file_path, adapter_module, adapter_class, adapter_kwargs, strip_fn_src)
+
+#     Returns (list_of_row_dicts, error_dict_or_None)
+#     Each row dict contains an extra '_type_name', '_method_name', '_calls' key
+#     that the main process uses to rebuild method_map / file_map.
+#     """
+#     import importlib, html as _html, re as _re, os as _os
+#     file_path, adapter_module_name, adapter_class_name, adapter_kwargs = args
+#     file = _os.path.basename(file_path)
+#     local_rows = []
+#     local_error = None
+
+#     # Re-instantiate the adapter in this subprocess
+#     try:
+#         mod = importlib.import_module(adapter_module_name)
+#         AdapterCls = getattr(mod, adapter_class_name)
+#         adapter = AdapterCls()
+#         adapter.configure(**adapter_kwargs)
+#     except Exception as e:
+#         return [], {'File': file_path, 'Error': f'Adapter init failed: {e}'}
+
+#     def _strip(text):
+#         if not isinstance(text, str):
+#             return ""
+#         return _re.sub(
+#             r'//.*?$|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
+#             '', text, flags=_re.MULTILINE | _re.DOTALL
+#         )
+
+#     def _is_commented(code, line_no):
+#         lines = code.splitlines()
+#         if line_no < 0 or line_no >= len(lines):
+#             return False
+#         line = lines[line_no].strip()
+#         return line.startswith("//") or line.startswith("/*") or line.startswith("*")
+
+#     def _read(path):
+#         try:
+#             with open(path, "r", encoding="utf-8") as fh:
+#                 return fh.read()
+#         except UnicodeDecodeError:
+#             with open(path, "r", encoding="latin-1") as fh:
+#                 return fh.read()
+
+#     null_meta = {'Annotations': 'None', 'Method_Declaration_Type': 'Default',
+#                   'return_type': '', 'Parameters': '', 'Parameter_Arity': None,
+#                   'Parameter_Types': ''}
+
+#     def append_row(type_name, type_kind, method_name, meta, call, calls_list):
+#         local_rows.append({
+#             'file_name': file,
+#             'class_interface_name': type_name,
+#             'type': type_kind or 'Unknown',
+#             'method_name': method_name,
+#             'Annotations': meta.get('Annotations', ''),
+#             'Method_Declaration_Type': meta.get('Method_Declaration_Type', 'Default'),
+#             'return_type': meta.get('return_type', ''),
+#             'object_call': call,
+#             'Parameters': meta.get('Parameters', ''),
+#             'Parameter_Arity': meta.get('Parameter_Arity', None),
+#             'Parameter_Types': meta.get('Parameter_Types', ''),
+#             '_type_name': type_name,
+#             '_method_name': method_name,
+#             '_calls': calls_list,
+#         })
+
+#     try:
+#         code_raw = _read(file_path)
+#         code = _html.unescape(code_raw)
+#         code_no_comments = _strip(code)
+
+#         ast = adapter.parse_ast(code_no_comments)
+#         if not ast:
+#             raise RuntimeError("AST parse failed")
+
+#         declared_types = list(adapter.get_declared_types(ast))
+
+#         if not declared_types:
+#             fb = adapter.fallback_parse(code_raw)
+#             type_name = fb.get('type_name', 'Unknown')
+#             row_type = fb.get('row_type', 'Unknown')
+#             filtered_calls = fb.get('filtered_calls', [])
+#             for call in filtered_calls or ["None"]:
+#                 append_row(type_name, row_type, "UnknownMethod", null_meta,
+#                            call, filtered_calls or ["None"])
+#             return local_rows, None
+
+#         for type_name, type_kind, type_node in declared_types:
+#             for method_name, method_node in adapter.get_methods_in_type(type_node):
+#                 try:
+#                     pos = method_node.position
+#                     if pos and _is_commented(code, pos[1] - 1):
+#                         continue
+#                 except Exception:
+#                     pass
+#                 meta = adapter.extract_method_metadata(method_node)
+#                 calls = adapter.find_calls_in_method(type_node, method_node, code_no_comments)
+#                 calls = list(dict.fromkeys(calls)) if calls else ["None"]
+#                 for call in calls:
+#                     append_row(type_name, type_kind, method_name, meta, call, calls)
+
+#     except Exception as e:
+#         local_error = {'File': file_path, 'Error': str(e)}
+#         try:
+#             code_raw = _read(file_path)
+#             code = _html.unescape(code_raw)
+#         except Exception as e2:
+#             return local_rows, [local_error,
+#                 {'File': file_path, 'Error': f"Read error in fallback: {e2}"}]
+
+#         fb = adapter.fallback_parse(code_raw)
+#         type_name = fb.get('type_name', 'Unknown')
+#         row_type = fb.get('row_type', 'Unknown')
+
+#         if 'per_method_calls' in fb and fb['per_method_calls']:
+#             for rec in fb['per_method_calls']:
+#                 method = rec.get('method_name') or 'UnknownMethod'
+#                 call = rec.get('object_call') or 'None'
+#                 local_rows.append({
+#                     'file_name': file, 'class_interface_name': type_name,
+#                     'type': row_type, 'method_name': method,
+#                     'Annotations': "None", 'Method_Declaration_Type': "Default",
+#                     'return_type': "", 'object_call': call,
+#                     'Parameters': '', 'Parameter_Arity': None, 'Parameter_Types': '',
+#                     '_type_name': type_name, '_method_name': method, '_calls': [call],
+#                 })
+#         else:
+#             filtered_calls = fb.get('filtered_calls', [])
+#             for call in filtered_calls or ["None"]:
+#                 local_rows.append({
+#                     'file_name': file, 'class_interface_name': type_name,
+#                     'type': row_type, 'method_name': "UnknownMethod",
+#                     'Annotations': "None", 'Method_Declaration_Type': "Default",
+#                     'return_type': "", 'object_call': call,
+#                     'Parameters': '', 'Parameter_Arity': None, 'Parameter_Types': '',
+#                     '_type_name': type_name, '_method_name': "UnknownMethod",
+#                     '_calls': filtered_calls or ["None"],
+#                 })
+#     return local_rows, local_error
+
+
+# def method_lineage(
+#     service_files,
+#     adapter,
+#     details,
+#     data,
+#     technology,
+#     application,
+#     app_folder,
+#     OUTPUT_DIR,
+#     groups,
+#     all_methods,
+#     controller_files,
+#     include_unqualified=True,
+#     accept_local_new_types=True,
+#     accept_parameter_types=True,
+#     accept_same_package=True
+# ):
+#     print("controller_files : ",controller_files)
+#     """
+#     Produces Excel with three sheets:
+#       - Cleaned_AST_Details (Class.method exploded per chain segment)
+#       - Unique_Methods (overload-aware; with LOC, annotations, return type, decl type)
+#       - application.properties
+#     """
+#     print("method_lineage")
+#     start_time = datetime.now()
+#     log_time(f"Method lineage Generation START")
+#     os.makedirs(OUTPUT_DIR, exist_ok=True)
+#     regex = data["Language"][technology]["Application"][application]["Regex_Pattern"]
+
+#     ast_results = []
+#     method_map = {}
+#     file_map = {}
+#     errors = []
+
+#     # ── Single progress bar: 0 → 100 across the whole pipeline ──────────────
+#     # Checkpoints (cumulative %):
+#     #   10  BFS discovery done
+#     #   60  All files parsed
+#     #   75  Chain resolution done
+#     #   90  LOC computation done
+#     #  100  Excel written
+#     _pbar = tqdm(
+#         total=100,
+#         desc="Progress",
+#         unit="%",
+#         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}% [{elapsed}<{remaining}] {postfix}",
+#         ncols=90,
+#         dynamic_ncols=True,
+#     )
+
+#     def _pbar_goto(target_pct, label):
+#         """Jump the bar to exactly target_pct, regardless of where it currently is."""
+#         delta = target_pct - _pbar.n
+#         if delta > 0:
+#             _pbar.update(delta)
+#         _pbar.set_postfix_str(label)
+
+#     # -----------------------------------------------------------
+#     # Performance caches and project file indexes
+#     # -----------------------------------------------------------
+#     file_content_cache = {}
+#     raw_ast_cache = {}
+
+#     adapter.configure(
+#         details=details,
+#         regex=regex,
+#         include_unqualified=include_unqualified,
+#         accept_local_new_types=accept_local_new_types,
+#         accept_parameter_types=accept_parameter_types,
+#         accept_same_package=accept_same_package,
+#         file_content_cache=file_content_cache,
+#         raw_ast_cache=raw_ast_cache,
+#     )
+#     file_name_to_path = {}
+
+#     valid_extensions = tuple(details.get("extension", []))
+
+#     if not valid_extensions:
+#         valid_extensions = (adapter.file_extension(),)
+
+#     # -----------------------------------------------------------
+#     # Controller-first BFS: discover only reachable files
+#     # -----------------------------------------------------------
+#     # Step 1: build a cheap class-name → path index (file stem, no parsing)
+#     _class_to_path = {}
+#     for _root, _, _files in os.walk(app_folder):
+#         for _f in _files:
+#             if _f.endswith(valid_extensions):
+#                 _stem = os.path.splitext(_f)[0]
+#                 _abs = os.path.abspath(os.path.join(_root, _f))
+#                 _class_to_path.setdefault(_stem, _abs)
+#                 # XxxImpl → also register as Xxx so callers of the interface find it
+#                 if _stem.endswith("Impl"):
+#                     _class_to_path.setdefault(_stem[:-4], _abs)
+#     print(f"[DEBUG] _class_to_path total entities : {len(_class_to_path)}")
+#     print(f"[DEBUG] sample entites: ")
+#     for k,v in list(_class_to_path.items())[:10]:
+#         print(f"  {k} -> {v}")
+
+#     def _bfs_read(path):
+#         try:
+#             with open(path, "r", encoding="utf-8") as _fh:
+#                 return _fh.read()
+#         except UnicodeDecodeError:
+#             with open(path, "r", encoding="latin-1") as _fh:
+#                 return _fh.read()
+
+#     # Matches field/param declarations — handles all modifiers and annotations.
+#     # Covers:
+#     #   private UserService userService;
+#     #   private final UserService userService;
+#     #   final ObjectService request;
+#     #   static UserService instance;
+#     #   @Autowired OrderRepo orderRepo;
+#     #   public MyController(UserService userService, OrderRepo orderRepo)
+#     #   final ObjectService request  <-- passed as argument
+#     _field_decl_re = re.compile(
+#         r'''
+#         (?:@\w+(?:\([^)]*\))?\s*)*                                    # annotations e.g. @Autowired
+#         (?:(?:private|public|protected|static|final|transient|volatile)\s+)*  # modifiers
+#         ([A-Z][A-Za-z0-9_]*(?:<[^>]+>)?)                               # ClassName (optional generics)
+#         \s+
+#         ([a-z][A-Za-z0-9_]*)                                            # variableName (lowercase start)
+#         \s*(?:[=;,)])                                                   # followed by = ; , or )
+#         ''',
+#         re.MULTILINE | re.VERBOSE
+#     )
+
+#     def _build_var_map(file_content):
+#         """
+#         Scan a Java source file for all variable declarations and return
+#         a dict of { variable_name -> ClassName } (generics stripped).
+
+#         Handles:
+#           private UserService userService;
+#           private final UserService userService;
+#           final ObjectService request;
+#           static UserService instance;
+#           @Autowired OrderRepo orderRepo;
+#           List<User> users = new ArrayList<>();
+#           public MyCtrl(final ObjectService request, OrderRepo repo)
+#         """
+#         var_map = {}
+#         for m in _field_decl_re.finditer(file_content):
+#             cls = m.group(1).split('<')[0]   # strip generics e.g. List<User> -> List
+#             var = m.group(2)
+#             var_map[var] = cls
+#         return var_map
+
+#     def _extract_class_name_from_call(call, var_map=None):
+#         """
+#         Resolve a call string to the class name it targets.
+#         Case 1: UserService.method()  -> first token is UpperCase -> return directly
+#         Case 2: userService.method()  -> first token is lowercase -> look up in var_map
+#         Returns None for bare method() calls (same-file, no BFS needed).
+#         """
+#         if not isinstance(call, str) or '.' not in call:
+#             return None
+#         base = call.split('.')[0].strip()
+#         if not base:
+#             return None
+#         # Case 1: already a class name (UpperCamelCase)
+#         if base[0].isupper():
+#             return base
+#         # Case 2: lowercase variable — resolve via field/param declarations
+#         if var_map:
+#             resolved = var_map.get(base)
+#             if resolved:
+#                 return resolved
+#         return None
+
+#     _visited_paths = set()
+#     java_files = []          # ordered list of reachable abs paths
+#     _bfs_queue = deque()
+
+#     def _enqueue(path):
+#         abs_p = os.path.abspath(path)
+#         if abs_p not in _visited_paths and os.path.isfile(abs_p):
+#             _visited_paths.add(abs_p)
+#             java_files.append(abs_p)
+#             _bfs_queue.append(abs_p)
+
+#     # Seed from controller_files
+#     for _cf in (service_files or []):
+#         print(f"[DEBUG] controller path exists: {os.path.isfile(_cf)} -> {_cf}")
+#         _enqueue(_cf)
+
+#     # Step 2: BFS — parse each file, extract callees, enqueue their files
+#     _strip_for_bfs = lambda text: re.sub(
+#         r'//.*?$|/\*.*?\*/|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'',
+#         '', text, flags=re.MULTILINE | re.DOTALL
+#     )
+
+#     _pbar.set_postfix_str("BFS: discovering files...")
+#     while _bfs_queue:
+#         _cur = _bfs_queue.popleft()
+#         try:
+#             _raw = _bfs_read(_cur)
+#         except Exception as _e:
+#             log_time(f"BFS: cannot read {_cur}: {_e}")
+#             continue
+
+#         _code = html.unescape(_raw)
+#         _code_clean = _strip_for_bfs(_code)
+#         _raw_calls = []
+
+#         try:
+#             _ast = adapter.parse_ast(_code_clean)
+#             if _ast:
+#                 for _, _, _type_node in adapter.get_declared_types(_ast):
+#                     for _, _method_node in adapter.get_methods_in_type(_type_node):
+#                         _raw_calls.extend(
+#                             adapter.find_calls_in_method(_type_node, _method_node, _code_clean) or []
+#                         )
+#             else:
+#                 raise RuntimeError("AST failed")
+#         except Exception:
+#             try:
+#                 _fb = adapter.fallback_parse(_raw)
+#                 for _rec in _fb.get('per_method_calls', []):
+#                     _c = _rec.get('object_call')
+#                     if _c:
+#                         _raw_calls.append(_c)
+#                 for _c in _fb.get('filtered_calls', []):
+#                     if _c:
+#                         _raw_calls.append(_c)
+#             except Exception as _e2:
+#                 log_time(f"BFS fallback failed for {_cur}: {_e2}")
+
+#         # Build variable->class map for this file so lowercase object names
+#         # (e.g. userService -> UserService, request -> ObjectService) are resolved.
+#         _var_map = _build_var_map(_code)
+#         for _call in _raw_calls:
+#             _cls = _extract_class_name_from_call(_call, _var_map)
+#             print(f"[BFS] call={_call!r:50} -> class={_cls}")
+#             if _cls:
+#                 _dep = _class_to_path.get(_cls)
+#                 if _dep:
+#                     _enqueue(_dep)
+
+#     # ── Checkpoint 10% ──
+#     _pbar_goto(10, f"BFS done: {len(java_files)} files found")
+#     log_time(f"BFS complete: {len(java_files)} reachable files from {len(controller_files or [])} controller(s)")
+
+#     # -----------------------------------------------------------
+#     # Copy all reachable Java files flat into OUTPUT_DIR/reachable_sources/
+#     # -----------------------------------------------------------
+#     import shutil
+#     _sources_dir = os.path.join(OUTPUT_DIR, "reachable_sources")
+#     os.makedirs(_sources_dir, exist_ok=True)
+#     for _fp in java_files:
+#         try:
+#             shutil.copy2(_fp, os.path.join(_sources_dir, os.path.basename(_fp)))
+#         except Exception as _copy_err:
+#             log_time(f"Could not copy {_fp}: {_copy_err}")
+#     log_time(f"Copied {len(java_files)} reachable source files to {_sources_dir}")
+
+#     # Build O(1) filename → path lookup (used by LOC resolver later)
+#     for _fp in java_files:
+#         file_name_to_path.setdefault(os.path.basename(_fp).lower(), _fp)
+
+#     def read_file_cached(file_path):
+#         """
+#         Read every source file only once during one method_lineage run.
+#         """
+#         if file_path in file_content_cache:
+#             return file_content_cache[file_path]
+
+#         try:
+#             with open(file_path, "r", encoding="utf-8") as source_file:
+#                 content = source_file.read()
+#         except UnicodeDecodeError:
+#             with open(file_path, "r", encoding="latin-1") as source_file:
+#                 content = source_file.read()
+
+#         file_content_cache[file_path] = content
+#         return content
+
+#     def parse_raw_ast_cached(file_path):
+#         """
+#         Parse the raw Java source only once.
+
+#         This cache is intentionally separate from adapter.parse_ast(),
+#         because the adapter receives comment/literal-stripped source.
+#         """
+#         if file_path not in raw_ast_cache:
+#             raw_ast_cache[file_path] = javalang.parse.parse(
+#                 read_file_cached(file_path)
+#             )
+
+#         return raw_ast_cache[file_path]
+
+#     # ------------------ Pre-build indexes in parallel (threads) ------------------
+#     # Index builds are I/O-bound (file read) + CPU (javalang parse).
+#     # They run in threads alongside the ProcessPoolExecutor below.
+#     # They use the shared file_content_cache / raw_ast_cache injected via configure().
+#     _index_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+#     _ocm_future = _index_executor.submit(adapter.build_object_class_map, app_folder)
+#     _mri_future = _index_executor.submit(adapter.build_method_return_index, app_folder)
+
+#     # ------------------ Walk all files with ProcessPoolExecutor ------------------
+#     # ProcessPoolExecutor spawns real OS subprocesses → bypasses the GIL →
+#     # javalang.parse.parse() truly runs in parallel across all CPU cores.
+#     #
+#     # Workers use the module-level _file_worker function (picklable).
+#     # Each worker receives plain serialisable data (no shared state).
+#     # Results are merged back into the main process.
+
+#     # Build the adapter config dict to pass to each worker subprocess.
+#     # Only serialisable primitives — no in-memory caches (can't cross process boundary).
+#     _adapter_module   = type(adapter).__module__
+#     _adapter_class    = type(adapter).__name__
+#     _adapter_kwargs   = dict(
+#         details=adapter.details,
+#         regex=adapter.regex,
+#         include_unqualified=adapter.include_unqualified,
+#         accept_local_new_types=adapter.accept_local_new_types,
+#         accept_parameter_types=adapter.accept_parameter_types,
+#         accept_same_package=adapter.accept_same_package,
+#         # Caches not passed — each worker has its own private cache
+#     )
+
+#     _cpu = multiprocessing.cpu_count() or 4
+#     # Cap workers: more than cpu_count gives no benefit for CPU-bound work;
+#     # very large pools waste memory on 5000-file codebases.
+#     _max_proc_workers = min(_cpu, 16)
+
+#     _worker_args = [
+#         (fp, _adapter_module, _adapter_class, _adapter_kwargs)
+#         for fp in java_files
+#     ]
+
+#     # Use 'spawn' context explicitly — safer on macOS/Windows and avoids
+#     # fork-related deadlocks with javalang's thread-local state.
+#     _mp_ctx = multiprocessing.get_context('spawn')
+
+#     _pbar.set_postfix_str(f"Parsing {len(java_files)} files...")
+#     with concurrent.futures.ProcessPoolExecutor(
+#         max_workers=_max_proc_workers,
+#         mp_context=_mp_ctx,
+#     ) as _proc_pool:
+#         _futures = {
+#             _proc_pool.submit(_file_worker, arg): arg[0]
+#             for arg in _worker_args
+#         }
+#         _total_files = len(_futures)
+#         _parse_done = 0
+#         for _fut in concurrent.futures.as_completed(_futures):
+#             _file_path = _futures[_fut]
+#             _file = os.path.basename(_file_path)
+#             _parse_done += 1
+#             # Proportional advance within 10% → 60% window
+#             _target = 10 + int(_parse_done / max(_total_files, 1) * 50)
+#             _pbar_goto(_target, f"Parsing: {_file} ({_parse_done}/{_total_files})")
+#             try:
+#                 _rows, _err = _fut.result()
+#             except Exception as _exc:
+#                 errors.append({'File': _file_path, 'Error': str(_exc)})
+#                 continue
+
+#             if _err:
+#                 if isinstance(_err, list):
+#                     errors.extend(_err)
+#                 else:
+#                     errors.append(_err)
+
+#             for _row in _rows:
+#                 _type_name   = _row.pop('_type_name',   _row.get('class_interface_name', 'Unknown'))
+#                 _method_name = _row.pop('_method_name',  _row.get('method_name', 'UnknownMethod'))
+#                 _calls       = _row.pop('_calls', [])
+#                 # Also populate main-process file_content_cache for LOC computation
+#                 if _file_path not in file_content_cache:
+#                     try:
+#                         file_content_cache[_file_path] = read_file_cached(_file_path)
+#                     except Exception:
+#                         pass
+#                 file_map.setdefault(_type_name, _file)
+#                 method_map.setdefault(_type_name, {})
+#                 method_map[_type_name][_method_name] = _calls
+#                 ast_results.append(_row)
+
+#     # ── Checkpoint 60% ──
+#     _pbar_goto(60, f"Parsing done: {len(java_files)} files")
+#     print(f"[DEBUG] java_files found by BFS : {len(java_files)}") 
+#     print(f"[DEBUG] ast_results rows : {len(ast_results)}") 
+#     print(f"[DEBUG] method_map classes : {len(method_map)}") 
+#     print(f"[DEBUG] errors from parsing : {len(errors)}") 
+#     if errors:
+#         for e in errors[:5]:
+#             print(f"ERROR FILE: {e.get('File')}")
+#             print(f"ERROR MSG : {e.get('Error')}")
+#     if errors: 
+#         for e in errors[:5]: # show first 5 errors 
+#             print(f" ERROR: {e}")
+#         # ---- Optional chain resolution ----
+#     # Build an inverted index: method_name → (type, calls) for O(1) lookup
+#     # instead of scanning all types on every resolve_chain call (was O(N²)).
+#     _method_to_type = {}  # method_name → first type that owns it
+#     for _typ, _methods in method_map.items():
+#         for _mname in _methods:
+#             _method_to_type.setdefault(_mname, _typ)
+
+#     chain_results = []
+
+#     def resolve_chain(current, visited):
+#         called_method = current.split('.')[-1] if '.' in current else current
+#         typ = _method_to_type.get(called_method)
+#         if typ is not None:
+#             calls = method_map[typ].get(called_method)
+#             file_name = file_map.get(typ, 'Unknown')
+#             if calls:
+#                 for call in calls:
+#                     chain_results.append({'File Name': file_name, 'Method Name': current, 'Object Call': call})
+#                     if call not in visited:
+#                         visited.add(call)
+#                         resolve_chain(call, visited)
+#             else:
+#                 chain_results.append({'File Name': file_name, 'Method Name': current, 'Object Call': ''})
+#         else:
+#             chain_results.append({'File Name': 'Unknown', 'Method Name': current, 'Object Call': ''})
+
+#     _pbar.set_postfix_str("Resolving call chains...")
+#     _chain_total = max(len(method_map), 1)
+#     _chain_done = 0
+#     for typ in method_map:
+#         _chain_done += 1
+#         _target = 60 + int(_chain_done / _chain_total * 15)
+#         _pbar_goto(_target, f"Chains: {typ[:30]} ({_chain_done}/{_chain_total})")
+#         for method in method_map[typ]:
+#             file_name = file_map.get(typ, 'Unknown')
+#             for call in method_map[typ][method]:
+#                 chain_results.append({'File Name': file_name, 'Method Name': method, 'Object Call': call})
+#                 resolve_chain(call, {call})
+
+#     # ── Checkpoint 75% ──
+#     _pbar_goto(75, "Chain resolution done")
+
+#     # ---- Cleaner: system-call filtering + mapping + chain explosion ----
+#     def clean_and_write(df, object_class_map=None, method_return_index=None):
+#         # Accept pre-built indexes (built in parallel) or build on-demand
+#         if object_class_map is None:
+#             object_class_map = adapter.build_object_class_map(app_folder)
+#         if method_return_index is None:
+#             method_return_index = adapter.build_method_return_index(app_folder)
+
+#         def build_interface_to_impl_map(source_files):
+#             iface_to_impl = {}
+
+#             for source_file_path in source_files:
+#                 file = os.path.basename(source_file_path)
+
+#                 if not file.endswith(".java"):
+#                     continue
+
+#                 impl_name = os.path.splitext(file)[0]
+
+#                 if impl_name.endswith("Impl"):
+#                     iface_name = impl_name[:-4]
+#                     iface_to_impl[iface_name] = impl_name
+
+#             return iface_to_impl
+
+#         iface_to_impl_map = build_interface_to_impl_map(java_files)
+
+#         lang_keywords = adapter.language_keywords()
+#         keyword_set = {kw.lower() for kw in lang_keywords}
+
+#         SYSTEM_METHODS = {
+#             m.lower()
+#             for m in details.get("SYSTEM_METHODS", [])
+#             if isinstance(m, str)
+#         }
+
+#         def is_system_call(call):
+#             return adapter.is_system_call(call)
+
+#         df_clean = df[~df["object_call"].apply(is_system_call)].copy()
+#         df_clean["object_call"] = df_clean["object_call"].fillna("None")
+
+#         def strip_generics(name):
+#             if not isinstance(name, str):
+#                 return name
+#             name = re.sub(r'\s*&amp;lt;[^&amp;gt]+&amp;gt;\s*', '', name)
+#             name = re.sub(r'\s*<[^>]+>\s*', '', name)
+#             return name
+
+#         chain_suppressions = set()
+
+#         def normalize_keyword_rooted_call(s, parent_class):
+#             if not isinstance(s, str) or not s.strip():
+#                 return s
+#             s = s.strip()
+#             m = re.match(r'^\s*(return|this|super|new)\s*\.\s*([A-Za-z_]\w*)(.*)$', s, flags=re.IGNORECASE)
+#             if m:
+#                 meth = m.group(2)
+#                 rest = m.group(3) or ""
+#                 return "{}.{}{}".format(strip_generics(parent_class), meth, rest).strip()
+#             return s
+
+#         # ------------------------------------------------------------------
+#         # Case 1 helper — inheritance walk
+#         # ------------------------------------------------------------------
+#         # Walk the extends chain stored in method_return_index["__extends__"]
+#         # to find the first ancestor class that actually declares the method.
+#         # Returns the owning class name, or class_name itself when not found.
+#         def _resolve_class_for_method(class_name, method_name, _visited=None):
+#             if not class_name or not method_name:
+#                 return class_name
+#             if _visited is None:
+#                 _visited = set()
+#             if class_name in _visited:
+#                 return class_name          # cycle guard
+#             _visited.add(class_name)
+#             entry = method_return_index.get(class_name, {})
+#             if method_name in entry:
+#                 return class_name          # declared here
+#             parent = entry.get("__extends__")
+#             if parent and parent != class_name:
+#                 return _resolve_class_for_method(parent, method_name, _visited)
+#             return class_name              # not found — keep original
+
+#         # ------------------------------------------------------------------
+#         # Case 2 helper — field-access chain resolution
+#         # ------------------------------------------------------------------
+#         # Resolves a dot-path that may mix field names and method calls,
+#         # e.g. "obj1.repo.dao.save()" where obj1, repo, dao are variables/
+#         # fields (no parens) and only save() is the actual method call.
+#         # Returns (resolved_class, trailing_method_name_or_None).
+#         def _resolve_field_chain(token_path, parent_class, file_name):
+#             # Strip the trailing "methodName" off the path (the part before "("
+#             # has already been passed in, so we just split off the last token).
+#             m_trail = re.match(r'^(.*?)\.([A-Za-z_]\w*)\s*$', token_path, re.DOTALL)
+#             if m_trail:
+#                 prefix_path = m_trail.group(1)
+#                 trailing_method = m_trail.group(2)
+#             else:
+#                 prefix_path = token_path
+#                 trailing_method = None
+
+#             tokens = [t.strip() for t in prefix_path.split('.') if t.strip()]
+#             current_class = None
+#             for i, tok in enumerate(tokens):
+#                 if i == 0:
+#                     # First token: go through the full _lookup_type resolution
+#                     # (handles object_class_map, iface_to_impl, etc.)
+#                     current_class = _lookup_type(tok, parent_class, file_name)
+#                 else:
+#                     # Subsequent tokens: treat as a field on current_class.
+#                     # Try object_class_map (scoped then global), then
+#                     # method_return_index return-type as a last resort.
+#                     resolved = (
+#                         object_class_map.get((file_name.lower(), tok.lower()))
+#                         or object_class_map.get(tok.lower())
+#                     )
+#                     if resolved:
+#                         current_class = strip_generics(resolved)
+#                     else:
+#                         ret = method_return_index.get(current_class, {}).get(tok)
+#                         if ret and str(ret).lower() not in ('void', '<constructor>'):
+#                             current_class = strip_generics(str(ret).split('.')[-1])
+#                         # else: best effort — keep current_class
+
+#             return current_class or strip_generics(parent_class), trailing_method
+
+#         def _lookup_type(base, parent_class, file_name):
+#             if not isinstance(base, str) or base.strip() == "":
+#                 return strip_generics(parent_class)
+#             b = base.strip()
+#             if b.lower() in keyword_set:
+#                 return strip_generics(parent_class)
+
+#             t_scoped = object_class_map.get((str(file_name).lower(), b.lower()))
+#             if t_scoped:
+#                 return strip_generics(t_scoped)
+
+#             t_global = object_class_map.get(b.lower())
+#             if t_global:
+#                 return strip_generics(t_global)
+
+#             b_no_gen = strip_generics(b)
+#             cap = (b_no_gen[0].upper() + b_no_gen[1:]) if b_no_gen else b_no_gen 
+#             if cap and cap in method_return_index: 
+#                 return cap
+
+#             if b_no_gen in iface_to_impl_map: 
+#                 impl_name = iface_to_impl_map[b_no_gen] 
+#                 impl_path = type_to_path_full.get(impl_name) 
+#                 if impl_path: 
+#                     iface_path = type_to_path_full.get(b_no_gen) 
+#                     method_in_iface = bool(method_return_index.get(b_no_gen)) 
+#                     method_in_impl = bool(method_return_index.get(impl_name)) 
+#                     if method_in_impl and not method_in_iface: 
+#                         return impl_name
+
+#             return b_no_gen
+
+#         def map_class_method_call(obj_call, parent_class, file_name):
+#             if not isinstance(obj_call, str) or obj_call.strip() == "":
+#                 return "None"
+
+#             mkw = re.match(r'^\s*(return|this|super|new)\s*\.\s*([A-Za-z_]\w*)(.*)$', obj_call, flags=re.IGNORECASE)
+#             if mkw:
+#                 meth = mkw.group(2)
+#                 rest = mkw.group(3) or ""
+#                 return "{}.{}{}".format(strip_generics(parent_class), meth, rest)
+
+#             if "." not in obj_call:
+#                 return obj_call
+
+#             first_dot = obj_call.find(".")
+#             obj = obj_call[:first_dot]
+#             rest = obj_call[first_dot + 1:]
+
+#             mapped_base = _lookup_type(obj, parent_class, file_name)
+
+#             # Case 1: if the method isn't declared in mapped_base, walk extends
+#             method_token = rest.split('(')[0].split('.')[0].strip()
+#             if method_token:
+#                 mapped_base = _resolve_class_for_method(mapped_base, method_token)
+
+#             return "{}.{}".format(mapped_base, rest)
+
+#         def resolve_chained_with_classes(obj_call, parent_class, file_name):
+#             if not isinstance(obj_call, str) or obj_call.strip() == "":
+#                 return "None"
+#             first_dot = obj_call.find(".")
+#             if first_dot == -1 or "(" not in obj_call:
+#                 return map_class_method_call(obj_call, parent_class, file_name)
+
+#             # Case 2: everything before the first "(" may contain field accesses
+#             # e.g. "obj1.repo.dao.save(...)" — resolve through _resolve_field_chain
+#             first_paren = obj_call.find("(")
+#             prefix_before_call = obj_call[:first_paren]   # e.g. "obj1.repo.dao.save"
+#             suffix_after_prefix = obj_call[first_paren:]  # e.g. "(...).next()"
+
+#             current_class, first_method = _resolve_field_chain(
+#                 prefix_before_call, parent_class, file_name
+#             )
+#             if not first_method:
+#                 return map_class_method_call(obj_call, parent_class, file_name)
+
+#             # Collect any further chained method calls after the first "()"
+#             remaining_methods = re.findall(r'\.([A-Za-z_]\w*)\s*\(', suffix_after_prefix)
+#             methods = [first_method] + remaining_methods
+
+#             chain_render = []
+#             for m in methods:
+#                 # Case 1: walk extends if this class doesn't directly own the method
+#                 owning_class = _resolve_class_for_method(strip_generics(current_class), m)
+#                 chain_render.append("{}.{}()".format(strip_generics(owning_class), m))
+#                 ret_type = method_return_index.get(owning_class, {}).get(m)
+#                 if not ret_type or str(ret_type).lower() in ('void', '<constructor>'):
+#                     break
+#                 current_class = strip_generics(str(ret_type).split('.')[-1])
+#             return ".".join(chain_render)
+
+#         def map_or_resolve(row):
+#             obj_call = row["object_call"]
+#             parent_cls = row["class_interface_name"]
+#             file_name = row["file_name"]
+#             if isinstance(obj_call, str) and "." in obj_call and "(" in obj_call:
+#                 return resolve_chained_with_classes(obj_call, parent_cls, file_name)
+#             return map_class_method_call(obj_call, parent_cls, file_name)
+
+#         # apply(axis=1) is slow for large DataFrames — iterate records instead
+#         _cmc_values = [
+#             map_or_resolve(row)
+#             for row in df_clean[["object_call", "class_interface_name", "file_name"]].to_dict("records")
+#         ]
+#         df_clean["class_method_call"] = _cmc_values
+#         df_clean["class_method_call"] = df_clean["class_method_call"].astype(str).str.replace(
+#             r'\s*&amp;lt;[^&amp;gt]+&amp;gt;\s*', '', regex=True
+#         ).str.replace(r'\s*<[^>]+>\s*', '', regex=True)
+
+#         def derive_chain_segments(obj_call, parent_class, file_name):
+#             if not isinstance(obj_call, str) or obj_call.strip() == "":
+#                 return []
+
+#             first_dot = obj_call.find(".")
+#             if first_dot == -1 or "(" not in obj_call:
+#                 m = re.match(r'^\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*\(', obj_call)
+#                 if m:
+#                     cls, mtd = strip_generics(m.group(1)), m.group(2)
+#                     # Case 1: walk extends for single-segment calls
+#                     owning = _resolve_class_for_method(cls, mtd)
+#                     return ["{}.{}()".format(owning, mtd)]
+#                 m2 = re.match(r'^\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*$', obj_call)
+#                 if m2:
+#                     cls, mtd = strip_generics(m2.group(1)), m2.group(2)
+#                     owning = _resolve_class_for_method(cls, mtd)
+#                     return ["{}.{}()".format(owning, mtd)]
+#                 return []
+
+#             # Case 2: resolve field-access chain before the first "("
+#             first_paren = obj_call.find("(")
+#             prefix_before_call = obj_call[:first_paren]
+#             suffix_after_prefix = obj_call[first_paren:]
+
+#             current_class, first_method = _resolve_field_chain(
+#                 prefix_before_call, parent_class, file_name
+#             )
+#             if not first_method:
+#                 m3 = re.match(r'^\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*$', obj_call)
+#                 if m3:
+#                     cls, mtd = strip_generics(m3.group(1)), m3.group(2)
+#                     owning = _resolve_class_for_method(cls, mtd)
+#                     return ["{}.{}()".format(owning, mtd)]
+#                 return []
+
+#             remaining_methods = re.findall(r'\.([A-Za-z_]\w*)\s*\(', suffix_after_prefix)
+#             methods = [first_method] + remaining_methods
+
+#             segments = []
+#             for mtd in methods:
+#                 # Case 1: walk extends to find the owning ancestor class
+#                 owning_class = _resolve_class_for_method(strip_generics(current_class), mtd)
+#                 segments.append("{}.{}()".format(strip_generics(owning_class), mtd))
+#                 ret_type = method_return_index.get(owning_class, {}).get(mtd)
+#                 if not ret_type or str(ret_type).lower() in ("void", "<constructor>"):
+#                     break
+#                 current_class = strip_generics(str(ret_type).split(".")[-1])
+#             return segments
+
+#         def explode_cleaned_ast_details(df_clean_local):
+#             # Convert to list-of-dicts once — much faster than iterrows()
+#             records = df_clean_local.to_dict("records")
+#             single_seg_pat_paren = re.compile(r'^\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*\([^)]*\)\s*$')
+#             single_seg_pat_noparen = re.compile(r'^\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*$')
+
+#             rows = []
+#             for row in records:
+#                 obj_call = str(row.get("object_call", "") or "").strip()
+#                 parent_class = str(row.get("class_interface_name", "") or "").strip()
+#                 file_name = str(row.get("file_name", "") or "").strip()
+
+#                 obj_call = normalize_keyword_rooted_call(obj_call, parent_class)
+#                 cmc = normalize_keyword_rooted_call(str(row.get("class_method_call", "") or "").strip(), parent_class)
+
+#                 base_context = {
+#                     "file_name": row.get("file_name"),
+#                     "class_interface_name": strip_generics(parent_class),
+#                     "type": row.get("type"),
+#                     "method_name": row.get("method_name"),
+#                     "Annotations": row.get("Annotations"),
+#                     "Method_Declaration_Type": row.get("Method_Declaration_Type"),
+#                     "return_type": row.get("return_type"),
+#                     "Parameters": row.get("Parameters", ""),
+#                     "Parameter_Arity": row.get("Parameter_Arity", None),
+#                     "Parameter_Types": row.get("Parameter_Types", ""),
+#                 }
+
+#                 segments = derive_chain_segments(obj_call, parent_class, file_name)
+#                 if segments:
+#                     for seg in segments:
+#                         row_dict = dict(base_context)
+#                         row_dict["object_call"] = seg
+#                         row_dict["class_method_call"] = seg
+#                         rows.append(row_dict)
+#                     continue
+
+#                 m2 = single_seg_pat_paren.match(cmc)
+#                 if m2:
+#                     cls, mtd = strip_generics(m2.group(1)), m2.group(2)
+#                     key = (base_context["file_name"], base_context["class_interface_name"], base_context["method_name"], mtd.lower())
+#                     if key in chain_suppressions:
+#                         continue
+#                     seg = "{}.{}()".format(cls, mtd)
+#                     row_dict = dict(base_context)
+#                     row_dict["object_call"] = seg
+#                     row_dict["class_method_call"] = seg
+#                     rows.append(row_dict)
+#                     continue
+
+#                 m2_np = single_seg_pat_noparen.match(cmc)
+#                 if m2_np:
+#                     cls, mtd = strip_generics(m2_np.group(1)), m2_np.group(2)
+#                     key = (base_context["file_name"], base_context["class_interface_name"], base_context["method_name"], mtd.lower())
+#                     if key in chain_suppressions:
+#                         continue
+#                     seg = "{}.{}()".format(cls, mtd)
+#                     row_dict = dict(base_context)
+#                     row_dict["object_call"] = seg
+#                     row_dict["class_method_call"] = seg
+#                     rows.append(row_dict)
+#                     continue
+
+#                 row_dict = dict(base_context)
+#                 row_dict["object_call"] = obj_call or "None"
+#                 row_dict["class_method_call"] = cmc or obj_call or "None"
+#                 rows.append(row_dict)
+
+#             df_out = pd.DataFrame(rows) if rows else df_clean_local.copy()
+#             if not df_out.empty:
+#                 df_out = df_out.drop_duplicates()
+#             return df_out
+
+#         df_clean_exploded = explode_cleaned_ast_details(df_clean)
+
+#         # ============================================================
+#         # FINAL SYSTEM METHOD DROP (AFTER CHAIN EXPLOSION)
+#         # ============================================================
+
+#         def extract_method_only(call):
+#             if not isinstance(call, str):
+#                 return None
+#             m = re.match(r'\s*[A-Za-z_]\w*\s*\.\s*([A-Za-z_]\w*)', call)
+#             return m.group(1).lower() if m else None
+
+#         df_clean_exploded["__method_only"] = (
+#             df_clean_exploded["class_method_call"]
+#             .astype(str)
+#             .apply(extract_method_only)
+#         )
+
+#         df_clean_exploded = df_clean_exploded[
+#             ~df_clean_exploded["__method_only"].isin(SYSTEM_METHODS)
+#         ].drop(columns="__method_only")
+
+#         # ============================================================
+#         # REMOVE CALLS BASED ON NON-USER-DEFINED IMPORTS
+#         # ============================================================
+
+#         def collect_external_import_classes(source_files, user_prefix):
+#             import_classes = set()
+#             import_pattern = re.compile(
+#                 r'^\s*import\s+(static\s+)?([\w\.]+)\s*;',
+#                 re.MULTILINE
+#             )
+
+#             for source_file_path in source_files:
+#                 try:
+#                     code = read_file_cached(source_file_path)
+#                 except Exception:
+#                     continue
+
+#                 for _, full_import in import_pattern.findall(code):
+#                     if user_prefix and full_import.startswith(user_prefix):
+#                         continue
+
+#                     simple_name = full_import.split(".")[-1]
+
+#                     # For wildcard imports the final component is "*".
+#                     if simple_name and simple_name != "*":
+#                         import_classes.add(simple_name)
+
+#             return import_classes
+
+#         def extract_base_class(class_method_call):
+#             if not isinstance(class_method_call, str):
+#                 return None
+#             m = re.match(r'\s*([A-Za-z_]\w*)\s*\.', class_method_call)
+#             return m.group(1) if m else None
+
+#         user_prefix = details.get("user_defined_generic_import", "")
+#         external_import_classes = collect_external_import_classes(
+#             java_files,
+#             user_prefix
+#         )
+
+#         df_clean_exploded["__base_class"] = df_clean_exploded["class_method_call"].apply(
+#             extract_base_class
+#         )
+
+#         df_clean_exploded = df_clean_exploded[
+#             ~df_clean_exploded["__base_class"].isin(external_import_classes)
+#         ].drop(columns="__base_class")
+
+#         # --- Enforce: if Class.method exists, drop object.method for the same call ---
+#         def _split_base_method(cmc):
+#             s = str(cmc or "").strip()
+#             m = re.match(
+#                 r'^\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*\(?\s*\)?\s*$',
+#                 s
+#             )
+#             if not m:
+#                 return None, None
+#             return m.group(1), m.group(2)
+
+#         df_ex = df_clean_exploded.copy()
+
+#         split_results = [
+#             _split_base_method(value)
+#             for value in df_ex["class_method_call"].tolist()
+#         ]
+
+#         if split_results:
+#             bases, methods = zip(*split_results)
+#             df_ex["__base"] = bases
+#             df_ex["__meth"] = methods
+#         else:
+#             df_ex["__base"] = None
+#             df_ex["__meth"] = None
+
+#         mask_valid = df_ex['__base'].notna() & df_ex['__meth'].notna()
+#         df_valid = df_ex[mask_valid].copy()
+
+#         df_valid['__upper_base'] = df_valid['__base'].apply(
+#             lambda b: (b[0].upper() + b[1:]) if isinstance(b, str) and b else b
+#         )
+
+#         class_rows = df_valid[
+#             df_valid["__base"].str[0].str.isupper().fillna(False)
+#         ].copy()
+
+#         class_key_set = set(
+#             zip(
+#                 class_rows['file_name'],
+#                 class_rows['class_interface_name'],
+#                 class_rows['method_name'],
+#                 class_rows['__upper_base'],
+#                 class_rows['__meth']
+#             )
+#         )
+
+#         valid_keys = list(
+#             zip(
+#                 df_valid["file_name"],
+#                 df_valid["class_interface_name"],
+#                 df_valid["method_name"],
+#                 df_valid["__upper_base"],
+#                 df_valid["__meth"]
+#             )
+#         )
+
+#         lower_case_base_mask = (
+#             df_valid["__base"]
+#             .astype(str)
+#             .str[0]
+#             .str.islower()
+#             .fillna(False)
+#         )
+
+#         df_valid["__drop"] = (
+#             lower_case_base_mask
+#             & pd.Series(
+#                 (key in class_key_set for key in valid_keys),
+#                 index=df_valid.index
+#             )
+#         )
+
+#         df_keep_valid = df_valid[
+#             ~df_valid["__drop"]
+#         ].drop(
+#             columns=["__base", "__meth", "__upper_base", "__drop"]
+#         )
+
+#         df_rest = df_ex[~mask_valid]
+#         df_clean_exploded = pd.concat([df_keep_valid, df_rest], ignore_index=True)
+
+#         df_clean_exploded = df_clean_exploded.drop_duplicates(
+#             subset=['file_name', 'class_interface_name', 'method_name', 'class_method_call']
+#         )
+
+#         # FINAL FILTER — DROP NON-USER-DEFINED IMPORT CALLS (second pass)
+#         # Reuse external_import_classes calculated above. Do not scan the
+#         # complete application folder for a second time.
+#         df_clean_exploded["__base_class"] = (
+#             df_clean_exploded["class_method_call"]
+#             .astype(str)
+#             .apply(extract_base_class)
+#         )
+
+#         df_clean_exploded = df_clean_exploded[
+#             ~df_clean_exploded["__base_class"].isin(external_import_classes)
+#         ].drop(columns="__base_class")
+
+#         # ============================================================
+#         # Callee collection from Cleaned_AST_Details
+#         # ============================================================
+#         callee_pairs = set()
+
+#         rx_qual = re.compile(r'^\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)\s*\(\s*\)\s*$')
+#         rx_unq = re.compile(r'^\s*([A-Za-z_]\w*)\s*(?:\(\s*\))?\s*$')
+
+#         # Use to_dict("records") — 50–100× faster than iterrows() on large DataFrames
+#         for row_x in df_clean_exploded[["class_method_call", "class_interface_name"]].to_dict("records"):
+#             cmc = str(row_x.get("class_method_call", "") or "").strip()
+#             parent_cls = str(row_x.get("class_interface_name", "") or "").strip()
+#             if not cmc:
+#                 continue
+
+#             m = rx_qual.match(cmc)
+#             if m:
+#                 cls = m.group(1)
+#                 mtd = m.group(2)
+#                 if mtd.lower() in SYSTEM_METHODS:
+#                     continue
+#                 callee_pairs.add((cls, mtd))
+#                 continue
+
+#             m2 = rx_unq.match(cmc)
+#             if m2:
+#                 mtd = m2.group(1)
+#                 if mtd.lower() in SYSTEM_METHODS:
+#                     continue
+#                 if method_return_index.get(parent_cls, {}).get(mtd) is not None:
+#                     callee_pairs.add((parent_cls, mtd))
+
+#         # ============================================================
+#         # Unique_Methods (overload-aware)
+#         # ============================================================
+
+#         df_unique_parent = (
+#             df_clean
+#             .assign(class_method_key=lambda x: (
+#                 x['class_interface_name'].astype(str) + "." +
+#                 x['method_name'].astype(str) + "(" +
+#                 x['Parameters'].fillna("").astype(str) + ")"
+#             ))
+#             .groupby(['class_interface_name', 'method_name', 'Parameters'], as_index=False)
+#             .agg({
+#                 'Annotations': 'first',
+#                 'return_type': 'first',
+#                 'Method_Declaration_Type': 'first',
+#                 'Parameter_Arity': 'first',
+#                 'Parameter_Types': 'first',
+#                 'class_method_key': 'first'
+#             })
+#         )[[
+#             "class_method_key",
+#             "class_interface_name", "method_name",
+#             "Parameters", "Parameter_Arity", "Parameter_Types",
+#             "Annotations", "return_type", "Method_Declaration_Type"
+#         ]]
+
+#         df_all_methods = (
+#             df[
+#                 ["class_interface_name", "method_name", "Parameters", "Parameter_Arity", "Parameter_Types",
+#                  "Annotations", "return_type", "Method_Declaration_Type"]
+#             ]
+#             .drop_duplicates(subset=["class_interface_name", "method_name", "Parameters"])
+#             .dropna(subset=["class_interface_name", "method_name"])
+#         ).copy()
+
+#         df_all_methods["class_method_key"] = (
+#             df_all_methods["class_interface_name"].astype(str) + "." +
+#             df_all_methods["method_name"].astype(str) + "(" +
+#             df_all_methods["Parameters"].fillna("").astype(str) + ")"
+#         )
+
+#         rows_callees = []
+#         for cls, mtd in callee_pairs:
+#             rtype = method_return_index.get(cls, {}).get(mtd, "")
+#             rows_callees.append({
+#                 "class_interface_name": cls,
+#                 "method_name": mtd,
+#                 "Parameters": "",
+#                 "Parameter_Arity": None,
+#                 "Parameter_Types": "",
+#                 "Annotations": "",
+#                 "return_type": rtype,
+#                 "Method_Declaration_Type": "Default"
+#             })
+#         df_callee_methods = pd.DataFrame(rows_callees)
+#         if not df_callee_methods.empty:
+#             df_callee_methods["class_method_key"] = (
+#                 df_callee_methods["class_interface_name"].astype(str) + "." +
+#                 df_callee_methods["method_name"].astype(str) + "(" +
+#                 df_callee_methods["Parameters"].fillna("").astype(str) + ")"
+#             )
+#         else:
+#             df_callee_methods = pd.DataFrame(columns=[
+#                 "class_method_key",
+#                 "class_interface_name", "method_name",
+#                 "Parameters", "Parameter_Arity", "Parameter_Types",
+#                 "Annotations", "return_type", "Method_Declaration_Type"
+#             ])
+
+#         df_unique_methods = pd.concat(
+#             [df_unique_parent, df_all_methods, df_callee_methods],
+#             ignore_index=True
+#         ).drop_duplicates(
+#             subset=["class_interface_name", "method_name", "Parameters"],
+#             keep="first"
+#         ).reset_index(drop=True)
+
+#         valid_kinds = {"class", "class_implements_interface", "interface"}
+
+#         valid_types_df = (
+#             df_clean_exploded[["class_interface_name", "type"]]
+#             .dropna(subset=["class_interface_name", "type"])
+#             .drop_duplicates()
+#         )
+
+#         valid_class_or_interface = set(
+#             valid_types_df.loc[valid_types_df["type"].str.lower().isin(valid_kinds), "class_interface_name"]
+#             .astype(str)
+#             .tolist()
+#         )
+
+#         df_unique_methods = df_unique_methods[
+#             df_unique_methods["class_interface_name"].astype(str).isin(valid_class_or_interface)
+#         ].reset_index(drop=True)
+
+#         # ============================================================
+#         # Accurate LOC computation (nested-aware + overload match)
+#         # Java 8 version: no 'record' in class_regex; no union-type hints
+#         # ============================================================
+
+            
+#         def build_type_to_path_including_nested(source_files):
+#             """
+#             Build a type-to-file index.  Uses the shared raw_ast_cache so
+#             files are never parsed more than once per run.  Falls back to a
+#             fast regex scan for files that failed to parse with javalang
+#             (saves a second parse attempt per failing file).
+#             """
+#             mapping = {}
+
+#             declaration_types = (
+#                 javalang.tree.ClassDeclaration,
+#                 javalang.tree.InterfaceDeclaration,
+#                 javalang.tree.EnumDeclaration,
+#             )
+
+#             # Regex fallback for files whose AST is unavailable
+#             _decl_re = re.compile(
+#                 r'\b(?:class|interface|enum)\s+([A-Za-z_]\w*)',
+#                 re.MULTILINE,
+#             )
+
+#             for fpath in source_files:
+#                 tree = raw_ast_cache.get(fpath)  # may be None (not yet cached)
+#                 if tree is None:
+#                     try:
+#                         tree = parse_raw_ast_cached(fpath)
+#                     except Exception:
+#                         tree = False  # parse failed
+#                         raw_ast_cache[fpath] = tree
+
+#                 if tree and tree is not False:
+#                     for _, decl in tree.filter(declaration_types):
+#                         name = getattr(decl, "name", None)
+#                         if not name:
+#                             continue
+#                         mapping.setdefault(name, fpath)
+#                         if name.endswith("Impl"):
+#                             mapping.setdefault(name[:-4], fpath)
+#                 else:
+#                     # AST unavailable — use regex on cached text (no extra I/O)
+#                     text = file_content_cache.get(fpath, "")
+#                     for m in _decl_re.finditer(text):
+#                         name = m.group(1)
+#                         mapping.setdefault(name, fpath)
+#                         if name.endswith("Impl"):
+#                             mapping.setdefault(name[:-4], fpath)
+
+#             return mapping
+
+#         type_to_path_full = build_type_to_path_including_nested(java_files)
+#         loc_cache = {}
+
+#         def get_method_line_count(
+#             details_cfg,
+#             java_folder,
+#             classname,
+#             methodname,
+#             java_file_path=None,
+#             line_cache=None,
+#             include_package_private=False,
+#             count_empty_lines=True,
+#             parameter_signature=None,
+#             parameter_arity=None,
+#             parameter_types=None
+#         ):
+#             """
+#             Robust LOC counter for a Java method/constructor.
+#             Java 8 version: class_regex excludes 'record' and 'sealed'/'non-sealed'.
+#             Return type annotations use plain Optional[int] (no union `|` syntax).
+#             """
+#             classname = str(classname).strip()
+#             methodname = str(methodname).strip()
+
+#             extension = details_cfg["extension"][0]
+
+#             if not java_file_path:
+#                 target_filename = "{}{}".format(
+#                     classname,
+#                     extension
+#                 ).lower()
+
+#                 java_file_path = file_name_to_path.get(target_filename)
+
+#             if not java_file_path:
+#                 impl_filename = "{}Impl{}".format(
+#                     classname,
+#                     extension
+#                 ).lower()
+
+#                 java_file_path = file_name_to_path.get(impl_filename)
+
+#             # Build the cache key after resolving the actual file path.
+#             # This prevents unresolved and resolved requests from using
+#             # different cache entries for the same method.
+#             cache_key = (
+#                 (java_file_path or "").lower(),
+#                 classname.lower(),
+#                 methodname.lower(),
+#                 include_package_private,
+#                 count_empty_lines,
+#                 str(parameter_arity),
+#                 str(parameter_types)
+#             )
+
+#             if line_cache is not None and cache_key in line_cache:
+#                 return line_cache[cache_key]
+
+#             if not java_file_path:
+#                 if line_cache is not None:
+#                     line_cache[cache_key] = None
+
+#                 print(
+#                     "Neither {} nor {} found".format(
+#                         "{}{}".format(classname, extension),
+#                         "{}Impl{}".format(classname, extension)
+#                     )
+#                 )
+#                 return None
+
+#             try:
+#                 text = read_file_cached(java_file_path)
+#             except Exception:
+#                 if line_cache is not None:
+#                     line_cache[cache_key] = None
+#                 return None
+
+#             text = text.replace("\r\n", "\n").replace("\r", "\n")
+#             lines = text.split("\n")
+
+#             # ------------------------------------------------------------------
+
+#             # ------------------------------------------------------------------
+#             # Helpers: comment/string-aware scanning
+#             # ------------------------------------------------------------------
+
+#             def find_matching_brace_from(pos):
+#                 # type: (int) -> Optional[int]
+#                 depth = 0
+#                 i = pos
+#                 in_block_comment = False
+#                 in_line_comment = False
+#                 in_string = False
+#                 string_char = None
+#                 while i < len(text):
+#                     ch = text[i]
+#                     nxt = text[i + 1] if i + 1 < len(text) else ""
+
+#                     if in_block_comment:
+#                         if ch == "*" and nxt == "/":
+#                             in_block_comment = False
+#                             i += 2
+#                             continue
+#                         i += 1
+#                         continue
+#                     if in_line_comment:
+#                         if ch == "\n":
+#                             in_line_comment = False
+#                         i += 1
+#                         continue
+#                     if in_string:
+#                         if ch == "\\":
+#                             i += 2
+#                             continue
+#                         if ch == string_char:
+#                             in_string = False
+#                             string_char = None
+#                         i += 1
+#                         continue
+
+#                     if ch == "/" and nxt == "*":
+#                         in_block_comment = True
+#                         i += 2
+#                         continue
+#                     if ch == "/" and nxt == "/":
+#                         in_line_comment = True
+#                         i += 2
+#                         continue
+#                     if ch in ("'", '"'):
+#                         in_string = True
+#                         string_char = ch
+#                         i += 1
+#                         continue
+
+#                     if ch == "{":
+#                         depth += 1
+#                     elif ch == "}":
+#                         depth -= 1
+#                         if depth == 0:
+#                             return i
+#                     i += 1
+#                 return None
+
+#             def find_method_terminator(from_pos):
+#                 in_block_comment = False
+#                 in_line_comment = False
+#                 in_string = False
+#                 string_char = None
+#                 i = from_pos
+
+#                 while i < len(text):
+#                     ch = text[i]
+#                     nxt = text[i + 1] if i + 1 < len(text) else ""
+
+#                     if in_block_comment:
+#                         if ch == "*" and nxt == "/":
+#                             in_block_comment = False
+#                             i += 2
+#                             continue
+#                         i += 1
+#                         continue
+
+#                     if in_line_comment:
+#                         if ch == "\n":
+#                             in_line_comment = False
+#                         i += 1
+#                         continue
+
+#                     if in_string:
+#                         if ch == "\\":
+#                             i += 2
+#                             continue
+#                         if ch == string_char:
+#                             in_string = False
+#                             string_char = None
+#                         i += 1
+#                         continue
+
+#                     if ch == "/" and nxt == "*":
+#                         in_block_comment = True
+#                         i += 2
+#                         continue
+#                     if ch == "/" and nxt == "/":
+#                         in_line_comment = True
+#                         i += 2
+#                         continue
+#                     if ch in ("'", '"'):
+#                         in_string = True
+#                         string_char = ch
+#                         i += 1
+#                         continue
+
+#                     if ch in ("{", ";"):
+#                         return ch, i
+
+#                     i += 1
+
+#                 return None, None
+
+#             def find_matching_paren_from(pos):
+#                 # type: (int) -> Optional[int]
+#                 i = pos
+#                 depth = 0
+#                 in_block_comment = in_line_comment = in_string = False
+#                 string_char = None
+#                 angle_depth = 0
+#                 while i < len(text):
+#                     ch = text[i]
+#                     nxt = text[i + 1] if i + 1 < len(text) else ""
+
+#                     if in_block_comment:
+#                         if ch == "*" and nxt == "/":
+#                             in_block_comment = False
+#                             i += 2
+#                             continue
+#                         i += 1
+#                         continue
+#                     if in_line_comment:
+#                         if ch == "\n":
+#                             in_line_comment = False
+#                         i += 1
+#                         continue
+#                     if in_string:
+#                         if ch == "\\":
+#                             i += 2
+#                             continue
+#                         if ch == string_char:
+#                             in_string = False
+#                             string_char = None
+#                         i += 1
+#                         continue
+
+#                     if ch == "/" and nxt == "*":
+#                         in_block_comment = True
+#                         i += 2
+#                         continue
+#                     if ch == "/" and nxt == "/":
+#                         in_line_comment = True
+#                         i += 2
+#                         continue
+#                     if ch in ("'", '"'):
+#                         in_string = True
+#                         string_char = ch
+#                         i += 1
+#                         continue
+
+#                     if ch == "<":
+#                         angle_depth += 1
+#                         i += 1
+#                         continue
+#                     if ch == ">" and angle_depth > 0:
+#                         angle_depth -= 1
+#                         i += 1
+#                         continue
+
+#                     if ch == "(":
+#                         depth += 1
+#                     elif ch == ")":
+#                         depth -= 1
+#                         if depth == 0:
+#                             return i
+#                     i += 1
+#                 return None
+
+#             def compute_arity_and_simple_types(param_region):
+#                 # type: (str) -> Tuple[int, List[str]]
+#                 s = re.sub(r'@\w+(?:\([^)]*\))?', '', param_region)
+#                 s = re.sub(r'<[^>]*>', '', s)
+#                 s = s.replace("\r", "").replace("\n", " ")
+
+#                 parts, buf, par = [], "", 0
+#                 for ch in s:
+#                     if ch == "(":
+#                         par += 1
+#                         buf += ch
+#                     elif ch == ")":
+#                         par = max(0, par - 1)
+#                         buf += ch
+#                     elif ch == "," and par == 0:
+#                         parts.append(buf.strip())
+#                         buf = ""
+#                     else:
+#                         buf += ch
+#                 if buf.strip():
+#                     parts.append(buf.strip())
+
+#                 if len(parts) == 1 and parts[0] == "":
+#                     return 0, []
+
+#                 types = []
+#                 for p in parts:
+#                     p = p.split("=", 1)[0].strip()
+#                     p = p.replace("...", "[]")
+#                     p = re.sub(r'\b(final|volatile|transient)\b', '', p)
+#                     toks = re.findall(r'[A-Za-z_]\w+|\[\]', p)
+#                     if not toks:
+#                         types.append("")
+#                         continue
+#                     arr = ""
+#                     while toks and toks[-1] == "[]":
+#                         arr += "[]"
+#                         toks.pop()
+#                     if not toks:
+#                         types.append(arr or "")
+#                         continue
+#                     _name = toks.pop()
+#                     type_tok = next((t for t in reversed(toks) if t != "[]"), "")
+#                     types.append((type_tok or "") + arr)
+
+#                 arity = 0 if (len(parts) == 1 and parts[0] == "") else len(parts)
+#                 return arity, [t for t in types]
+
+#             # ============================================================
+#             # 1) Match the target class/interface/enum in the file
+#             #    Java 8: no 'record', no 'sealed', no 'non-sealed'
+#             # ============================================================
+#             _anno_arg = r'(?:\([^()]*(?:\([^()]*\)[^()]*)*\))?'
+#             _anno_prefix = r'(?:@\w+' + _anno_arg + r'[ \t]*\n?[ \t]*)*'
+#             # Java 8: only class / interface / enum (no record)
+#             class_kw = r"(?:class|interface|enum)"
+#             class_regex = re.compile(
+#                 r"(?m)^[ \t]*" + _anno_prefix +
+#                 r"(?:public|protected|private)?[ \t]*" +
+#                 r"(?:(?:abstract|final|static|strictfp)[ \t]+)*" +
+#                 class_kw + r"[ \t]+" + re.escape(classname) + r"\b"
+#             )
+#             class_match = class_regex.search(text)
+#             if not class_match:
+#                 class_regex_fallback = re.compile(
+#                     _anno_prefix +
+#                     r"(?:public|protected|private)?[ \t]*" +
+#                     r"(?:(?:abstract|final|static|strictfp)[ \t]+)*" +
+#                     class_kw + r"[ \t]+" + re.escape(classname) + r"\b"
+#                 )
+#                 class_match = class_regex_fallback.search(text)
+#             if not class_match:
+#                 if line_cache is not None:
+#                     line_cache[cache_key] = None
+#                 return None
+
+#             class_decl_end = class_match.end()
+#             class_open = text.find("{", class_decl_end)
+#             if class_open == -1:
+#                 if line_cache is not None:
+#                     line_cache[cache_key] = 1
+#                 return 1
+
+#             class_close = find_matching_brace_from(class_open)
+#             if class_close is None:
+#                 class_close = len(text) - 1
+
+#             class_block = text[class_open:class_close + 1]
+#             class_block_global_start = class_open
+#             class_block_start_line = text.count("\n", 0, class_open) + 1
+
+#             # ============================================================
+#             # 2) Find the method/constructor signature in the class block
+#             # ============================================================
+#             access_req = r"(?:public|private|protected)"
+#             access = r"(?:" + access_req + r")?" if include_package_private else access_req
+#             # Java 8: no 'sealed', 'non-sealed' modifiers
+#             modifiers = r"(?:(?:static|final|abstract|synchronized|native|strictfp|default)\b[ \t]*)*"
+#             methodname_esc = re.escape(methodname)
+
+#             method_decl_regex = re.compile(
+#                 r"(?m)^[ \t]*" + access + r"[ \t]*" + modifiers +
+#                 r"(?:<[^>]*>\s*)?" +
+#                 r"[A-Za-z_][\w.<>\[\],\s?]*\s+" +
+#                 methodname_esc + r"[ \t]*\(",
+#                 re.IGNORECASE
+#             )
+
+#             ctor_decl_regex = re.compile(
+#                 r"(?m)^[ \t]*" + access + r"[ \t]*" + modifiers +
+#                 r"\b" + re.escape(classname) + r"[ \t]*\(",
+#                 re.IGNORECASE
+#             )
+
+#             matches = (
+#                 list(ctor_decl_regex.finditer(class_block))
+#                 if methodname == classname
+#                 else list(method_decl_regex.finditer(class_block))
+#             )
+
+#             if not matches:
+#                 def _make_interface_method_regex(mname):
+#                     anno_arg = r'(?:\([^()]*(?:\([^()]*\)[^()]*)*\))?'
+#                     anno_line = r'(?:^[ \t]*@\w+' + anno_arg + r'[ \t]*(?:\n|\Z))*'
+#                     ret_type = r'[A-Za-z_][\w$]*(?:\s*<[^;{]*?>)?(?:\s*\[\s*\])*'
+#                     param = r'[^;{]*?'
+#                     return re.compile(
+#                         r"(?ms)" +
+#                         anno_line +
+#                         r"^[ \t]*(?:(?:public|protected|private|default|static|abstract)\s+)*" +
+#                         ret_type + r"\s+" +
+#                         re.escape(mname) + r"[ \t]*\(" + param + r"\)" +
+#                         r"(?:\s+throws\s+[^;{]+)?[ \t]*;",
+#                         re.IGNORECASE
+#                     )
+
+#                 interface_match = _make_interface_method_regex(methodname).search(class_block)
+
+#                 if interface_match:
+#                     start_line = text.count(
+#                         "\n", 0, class_block_global_start + interface_match.start()
+#                     ) + 1
+#                     end_line = text.count(
+#                         "\n", 0, class_block_global_start + interface_match.end()
+#                     ) + 1
+#                     loc = max(1, end_line - start_line + 1)
+#                     if line_cache is not None:
+#                         line_cache[cache_key] = loc
+#                     return loc
+
+#                 if line_cache is not None:
+#                     line_cache[cache_key] = None
+#                 return None
+
+#             # ============================================================
+#             # 3) For EACH candidate overload, compute LOC + signature info
+#             # ============================================================
+#             def compute_loc_for_match(m_match):
+#                 sig_global_start = class_block_global_start + m_match.start()
+#                 sig_global_end = class_block_global_start + m_match.end()
+#                 sig_line_idx = text.count("\n", 0, sig_global_start) + 1
+
+#                 def anno_block_start(signature_line_index):
+#                     i = signature_line_index - 2
+#                     if i < 0:
+#                         return None
+#                     paren_balance = 0
+#                     started = False
+#                     start_line = None
+#                     while i >= class_block_start_line - 1:
+#                         raw = lines[i]
+#                         line = raw.rstrip()
+#                         if not line.strip() and not (started and paren_balance > 0):
+#                             break
+#                         is_anno = line.lstrip().startswith("@")
+#                         if not started:
+#                             if is_anno:
+#                                 started = True
+#                                 start_line = i + 1
+#                                 paren_balance = line.count("(") - line.count(")")
+#                             else:
+#                                 break
+#                         else:
+#                             if is_anno or paren_balance > 0:
+#                                 start_line = i + 1
+#                                 paren_balance += line.count("(") - line.count(")")
+#                             else:
+#                                 break
+#                         i -= 1
+#                     return start_line
+
+#                 start_line_idx = anno_block_start(sig_line_idx) or sig_line_idx
+
+#                 terminator, term_pos = find_method_terminator(sig_global_end)
+
+#                 if terminator == ";":
+#                     end_line_idx = text.count("\n", 0, term_pos) + 1
+#                     if count_empty_lines:
+#                         return max(1, end_line_idx - start_line_idx + 1)
+#                     else:
+#                         segment = lines[start_line_idx - 1:end_line_idx]
+#                         return max(1, sum(1 for ln in segment if ln.strip()))
+
+#                 if terminator != "{":
+#                     return 1
+
+#                 brace_open_pos = term_pos
+#                 brace_close_pos = find_matching_brace_from(brace_open_pos)
+#                 if brace_close_pos is None:
+#                     brace_close_pos = len(text) - 1
+
+#                 end_line_idx = text.count("\n", 0, brace_close_pos) + 1
+
+#                 if count_empty_lines:
+#                     return max(1, end_line_idx - start_line_idx + 1)
+#                 else:
+#                     segment = lines[start_line_idx - 1:end_line_idx]
+#                     return max(1, sum(1 for ln in segment if ln.strip()))
+
+#             candidates = []
+#             for m_match in matches:
+#                 paren_open_pos = class_block_global_start + m_match.end() - 1
+#                 paren_close_pos = find_matching_paren_from(paren_open_pos)
+#                 if paren_close_pos is None:
+#                     loc = compute_loc_for_match(m_match)
+#                     candidates.append({"arity": None, "types": [], "loc": loc})
+#                     continue
+#                 param_region = text[paren_open_pos + 1:paren_close_pos]
+#                 m_arity, m_types = compute_arity_and_simple_types(param_region)
+#                 loc = compute_loc_for_match(m_match)
+#                 candidates.append({"arity": m_arity, "types": m_types, "loc": loc})
+
+#             target_arity = None
+#             if parameter_arity is not None:
+#                 try:
+#                     target_arity = int(parameter_arity)
+#                 except Exception:
+#                     target_arity = None
+
+#             target_types = [t.strip() for t in str(parameter_types or "").split(";") if t and t.strip()]
+
+#             def simple_equal(a, b):
+#                 def norm(x):
+#                     x = (x or "").strip()
+#                     x = x.split(".")[-1]
+#                     x = re.sub(r'\[]+$', '[]', x)
+#                     return x.lower()
+#                 return norm(a) == norm(b)
+
+#             best_loc = None
+#             if candidates:
+#                 pool = candidates
+
+#                 if target_arity is not None:
+#                     pool = [c for c in pool if c["arity"] == target_arity] or pool
+
+#                 if len(pool) > 1 and target_types:
+#                     def score(c):
+#                         if not c["types"] or len(c["types"]) != len(target_types):
+#                             return -1
+#                         return sum(1 for i in range(len(target_types)) if simple_equal(c["types"][i], target_types[i]))
+#                     scored = [(score(c), c) for c in pool]
+#                     max_score = max(s for s, _ in scored)
+#                     pool = [c for s, c in scored if s == max_score]
+
+#                 best_loc = max(c["loc"] for c in pool)
+
+#             if line_cache is not None:
+#                 line_cache[cache_key] = best_loc
+#             return best_loc
+
+#         def extract_loc_any(row):
+#             classname = str(row["class_interface_name"]).strip()
+#             methodname = str(row["method_name"]).strip()
+
+#             if methodname.lower() in SYSTEM_METHODS:
+#                 return None
+
+#             java_file_path = type_to_path_full.get(classname)
+
+#             return get_method_line_count(
+#                 details_cfg=details,
+#                 java_folder=app_folder,
+#                 classname=classname,
+#                 methodname=methodname,
+#                 java_file_path=java_file_path,
+#                 line_cache=loc_cache,
+#                 include_package_private=True,
+#                 count_empty_lines=True,
+#                 parameter_signature=row.get("Parameters", None),
+#                 parameter_arity=row.get("Parameter_Arity", None),
+#                 parameter_types=row.get("Parameter_Types", None)
+#             )
+
+#         loc_lookup = {}
+
+#         # Parallelise LOC computation — each call is independent and I/O-bound
+#         # (file reads hit the in-process cache after the first access).
+#         _unique_rows = [
+#             row for row in df_unique_methods.to_dict("records")
+#             if row["class_method_key"] not in loc_lookup
+#         ]
+
+#         def _compute_loc(row):
+#             return row["class_method_key"], extract_loc_any(row)
+
+#         _pbar.set_postfix_str(f"Computing LOC for {len(_unique_rows)} methods...")
+#         _loc_workers = min(8, (multiprocessing.cpu_count() or 4))
+#         _loc_total = max(len(_unique_rows), 1)
+#         _loc_done = 0
+#         with concurrent.futures.ThreadPoolExecutor(max_workers=_loc_workers) as _loc_pool:
+#             for _key, _val in _loc_pool.map(_compute_loc, _unique_rows):
+#                 loc_lookup.setdefault(_key, _val)
+#                 _loc_done += 1
+#                 _target = 75 + int(_loc_done / _loc_total * 15)
+#                 _pbar_goto(_target, f"LOC: {_loc_done}/{_loc_total} methods")
+
+#         # ── Checkpoint 90% ──
+#         _pbar_goto(90, "LOC done")
+
+#         df_unique_methods["Number_Of_Lines"] = (
+#             df_unique_methods["class_method_key"].map(loc_lookup)
+#         )
+            
+#         desired_cols = [
+#             "class_method_key",
+#             "class_interface_name", "method_name",
+#             "Parameters", "Parameter_Arity", "Parameter_Types",
+#             "Annotations", "return_type", "Method_Declaration_Type",
+#             "Number_Of_Lines",
+#         ]
+#         existing_cols = [c for c in desired_cols if c in df_unique_methods.columns]
+#         df_unique_methods = df_unique_methods[existing_cols].reset_index(drop=True)
+
+#         df_unique_methods.insert(0, "Method ID", ["M{}".format(str(i + 1).zfill(4)) for i in range(len(df_unique_methods))])
+
+#         def _strip_parens_preserve(s):
+#             if not isinstance(s, str):
+#                 return s
+#             return re.sub(r'\(\s*[^)]*\)', '', s)
+
+#         def _unescape_html(s):
+#             if not isinstance(s, str):
+#                 return s
+#             return html.unescape(s)
+
+#         for col in ['object_call', 'class_method_call', 'class_interface_name', 'return_type']:
+#             if col in df_clean_exploded.columns:
+#                 df_clean_exploded[col] = df_clean_exploded[col].apply(_strip_parens_preserve).apply(_unescape_html)
+
+#         df_application_properties = adapter.extract_application_properties_from_folder(app_folder)
+
+#         excel_path = os.path.join(OUTPUT_DIR,all_methods)
+#         if not os.path.exists(excel_path):
+#             with pd.ExcelWriter(excel_path, engine="openpyxl", mode="w") as writer:
+#                 pd.DataFrame({"init": []}).to_excel(writer, sheet_name="Init", index=False)
+
+#         _pbar.set_postfix_str("Writing Excel...")
+#         with pd.ExcelWriter(excel_path, engine="xlsxwriter") as writer:
+#             df_clean_exploded.to_excel(writer,sheet_name="Cleaned_AST_Details",index=False)
+#             df_application_properties.to_excel(writer,sheet_name="application.properties",index=False)
+
+#         # ── Checkpoint 100% ──
+#         _pbar_goto(100, f"Done -> {os.path.basename(excel_path)}")
+#         _pbar.close()
+#         return os.path.abspath(excel_path)
+
+#     df_results = pd.DataFrame(
+#         ast_results,
+#         columns=[
+#             'file_name',
+#             'class_interface_name',
+#             'type',
+#             'method_name',
+#             'Annotations',
+#             'Method_Declaration_Type',
+#             'return_type',
+#             'object_call',
+#             'Parameters',
+#             'Parameter_Arity',
+#             'Parameter_Types'
+#         ]
+#     )
+
+#     # Collect pre-built index results (built in parallel with the AST loop)
+#     _prebuilt_ocm = _ocm_future.result()
+#     _prebuilt_mri = _mri_future.result()
+#     _index_executor.shutdown(wait=True)
+
+#     all_methods = clean_and_write(df_results, _prebuilt_ocm, _prebuilt_mri)
+#     end_time = datetime.now()
+
+#     elapsed = (end_time - start_time).total_seconds()
+#     log_time(
+#         f"Method Lineage Generation END | "
+#         f"Duration={elapsed:.3f} sec"
+#     )
+#     return all_methods,_sources_dir
+
 import os
 import re
 import html
@@ -14,6 +2128,7 @@ from tqdm import tqdm
 def log_time(message):
     with open("execution_log_service.txt", "a", encoding="utf-8") as f:
         f.write(f"{datetime.now()} - {message}\n")
+
 
 
 class LanguageAdapter:
@@ -420,7 +2535,7 @@ def method_lineage(
         r'''
         (?:@\w+(?:\([^)]*\))?\s*)*                                    # annotations e.g. @Autowired
         (?:(?:private|public|protected|static|final|transient|volatile)\s+)*  # modifiers
-        ([A-Z][A-Za-z0-9_]*(?:<[^>]+>)?)                               # ClassName (optional generics)
+        ([A-Z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)*(?:<[^>]+>)?)     # ClassName OR nested type
         \s+
         ([a-z][A-Za-z0-9_]*)                                            # variableName (lowercase start)
         \s*(?:[=;,)])                                                   # followed by = ; , or )
@@ -444,7 +2559,7 @@ def method_lineage(
         """
         var_map = {}
         for m in _field_decl_re.finditer(file_content):
-            cls = m.group(1).split('<')[0]   # strip generics e.g. List<User> -> List
+            cls = m.group(1).split('<')[0].split('.')[0]   # strip generics e.g. List<User> -> List
             var = m.group(2)
             var_map[var] = cls
         return var_map
@@ -857,7 +2972,54 @@ def method_lineage(
                             current_class = strip_generics(str(ret).split('.')[-1])
                         # else: best effort — keep current_class
 
-            return current_class or strip_generics(parent_class), trailing_method
+            resolved_class = current_class or strip_generics(parent_class)
+            resolved_class = _normalize_owner_class_for_member(resolved_class, trailing_method)
+            return resolved_class, trailing_method
+
+        def _normalize_owner_class_for_member(class_name, member_name=None):
+            if not isinstance(class_name, str):
+                return class_name
+            cls = strip_generics(class_name).strip()
+            if not cls:
+                return cls
+
+            member = (member_name or "").strip()
+            if not member:
+                return cls
+
+            candidates = []
+            seen = set()
+
+            def _add(c):
+                if not isinstance(c, str):
+                    return
+                c = strip_generics(c).strip()
+                if c and c not in seen:
+                    seen.add(c)
+                    candidates.append(c)
+
+            parts = [p.strip() for p in cls.split('.') if p.strip()]
+
+            # IMPORTANT:
+            # For nested types A.B.C, prefer enclosing owners first: A.B, A, then C, B, then full A.B.C
+            # This resolves builder-variable cases to logical owner class.
+            if len(parts) > 1:
+                for i in range(len(parts) - 1, 0, -1):
+                    _add(".".join(parts[:i]))
+                for p in reversed(parts):
+                    if p and p[0].isupper():
+                        _add(p)
+                _add(cls)  # full nested type as fallback
+            else:
+                _add(cls)
+
+            for cand in candidates:
+                owner = _resolve_class_for_method(cand, member)
+                if owner and member in method_return_index.get(owner, {}):
+                    return owner
+
+            return cls
+
 
         def _lookup_type(base, parent_class, file_name):
             if not isinstance(base, str) or base.strip() == "":
@@ -868,25 +3030,25 @@ def method_lineage(
 
             t_scoped = object_class_map.get((str(file_name).lower(), b.lower()))
             if t_scoped:
-                return strip_generics(t_scoped)
+                return strip_generics(t_scoped).split('.')[0]
 
-            t_global = object_class_map.get(b.lower())
-            if t_global:
-                return strip_generics(t_global)
+            # t_global = object_class_map.get(b.lower())
+            # if t_global:
+            #     return strip_generics(t_global).split('.')[0]
 
             b_no_gen = strip_generics(b)
-            cap = (b_no_gen[0].upper() + b_no_gen[1:]) if b_no_gen else b_no_gen 
-            if cap and cap in method_return_index: 
+            cap = (b_no_gen[0].upper() + b_no_gen[1:]) if b_no_gen else b_no_gen
+            if cap and cap in method_return_index:
                 return cap
 
-            if b_no_gen in iface_to_impl_map: 
-                impl_name = iface_to_impl_map[b_no_gen] 
-                impl_path = type_to_path_full.get(impl_name) 
-                if impl_path: 
-                    iface_path = type_to_path_full.get(b_no_gen) 
-                    method_in_iface = bool(method_return_index.get(b_no_gen)) 
-                    method_in_impl = bool(method_return_index.get(impl_name)) 
-                    if method_in_impl and not method_in_iface: 
+            if b_no_gen in iface_to_impl_map:
+                impl_name = iface_to_impl_map[b_no_gen]
+                impl_path = type_to_path_full.get(impl_name)
+                if impl_path:
+                    iface_path = type_to_path_full.get(b_no_gen)
+                    method_in_iface = bool(method_return_index.get(b_no_gen))
+                    method_in_impl = bool(method_return_index.get(impl_name))
+                    if method_in_impl and not method_in_iface:
                         return impl_name
 
             return b_no_gen
@@ -910,9 +3072,9 @@ def method_lineage(
 
             mapped_base = _lookup_type(obj, parent_class, file_name)
 
-            # Case 1: if the method isn't declared in mapped_base, walk extends
             method_token = rest.split('(')[0].split('.')[0].strip()
             if method_token:
+                mapped_base = _normalize_owner_class_for_member(mapped_base, method_token)
                 mapped_base = _resolve_class_for_method(mapped_base, method_token)
 
             return "{}.{}".format(mapped_base, rest)
@@ -924,11 +3086,9 @@ def method_lineage(
             if first_dot == -1 or "(" not in obj_call:
                 return map_class_method_call(obj_call, parent_class, file_name)
 
-            # Case 2: everything before the first "(" may contain field accesses
-            # e.g. "obj1.repo.dao.save(...)" — resolve through _resolve_field_chain
             first_paren = obj_call.find("(")
-            prefix_before_call = obj_call[:first_paren]   # e.g. "obj1.repo.dao.save"
-            suffix_after_prefix = obj_call[first_paren:]  # e.g. "(...).next()"
+            prefix_before_call = obj_call[:first_paren]
+            suffix_after_prefix = obj_call[first_paren:]
 
             current_class, first_method = _resolve_field_chain(
                 prefix_before_call, parent_class, file_name
@@ -936,20 +3096,20 @@ def method_lineage(
             if not first_method:
                 return map_class_method_call(obj_call, parent_class, file_name)
 
-            # Collect any further chained method calls after the first "()"
             remaining_methods = re.findall(r'\.([A-Za-z_]\w*)\s*\(', suffix_after_prefix)
             methods = [first_method] + remaining_methods
 
             chain_render = []
             for m in methods:
-                # Case 1: walk extends if this class doesn't directly own the method
-                owning_class = _resolve_class_for_method(strip_generics(current_class), m)
+                owning_class = _normalize_owner_class_for_member(current_class, m)
+                owning_class = _resolve_class_for_method(strip_generics(owning_class), m)
                 chain_render.append("{}.{}()".format(strip_generics(owning_class), m))
                 ret_type = method_return_index.get(owning_class, {}).get(m)
                 if not ret_type or str(ret_type).lower() in ('void', '<constructor>'):
                     break
                 current_class = strip_generics(str(ret_type).split('.')[-1])
             return ".".join(chain_render)
+
 
         def map_or_resolve(row):
             obj_call = row["object_call"]
@@ -1009,8 +3169,8 @@ def method_lineage(
 
             segments = []
             for mtd in methods:
-                # Case 1: walk extends to find the owning ancestor class
-                owning_class = _resolve_class_for_method(strip_generics(current_class), mtd)
+                owning_class = _normalize_owner_class_for_member(current_class, mtd)
+                owning_class = _resolve_class_for_method(strip_generics(owning_class), mtd)
                 segments.append("{}.{}()".format(strip_generics(owning_class), mtd))
                 ret_type = method_return_index.get(owning_class, {}).get(mtd)
                 if not ret_type or str(ret_type).lower() in ("void", "<constructor>"):
@@ -1403,10 +3563,8 @@ def method_lineage(
             (saves a second parse attempt per failing file).
 
             Returns: dict of  simple_name -> [path1, path2, ...]
-            All paths are kept so that the import-based resolver can
-            disambiguate when the same class name exists in multiple packages.
             """
-            mapping = {}   # simple_name -> [abs_path, ...]
+            mapping = {}
 
             def _add(name, fpath):
                 mapping.setdefault(name, [])
@@ -1419,19 +3577,25 @@ def method_lineage(
                 javalang.tree.EnumDeclaration,
             )
 
-            # Regex fallback for files whose AST is unavailable
             _decl_re = re.compile(
                 r'\b(?:class|interface|enum)\s+([A-Za-z_]\w*)',
                 re.MULTILINE,
             )
 
             for fpath in source_files:
-                tree = raw_ast_cache.get(fpath)  # may be None (not yet cached)
+                # Ensure text cache exists even for files outside BFS set
+                if fpath not in file_content_cache:
+                    try:
+                        _ = read_file_cached(fpath)
+                    except Exception:
+                        file_content_cache[fpath] = ""
+
+                tree = raw_ast_cache.get(fpath)
                 if tree is None:
                     try:
                         tree = parse_raw_ast_cached(fpath)
                     except Exception:
-                        tree = False  # parse failed
+                        tree = False
                         raw_ast_cache[fpath] = tree
 
                 if tree and tree is not False:
@@ -1443,7 +3607,7 @@ def method_lineage(
                         if name.endswith("Impl"):
                             _add(name[:-4], fpath)
                 else:
-                    # AST unavailable — use regex on cached text (no extra I/O)
+                    # IMPORTANT: use cached text that was loaded above
                     text = file_content_cache.get(fpath, "")
                     for m in _decl_re.finditer(text):
                         name = m.group(1)
@@ -1466,6 +3630,7 @@ def method_lineage(
                     _all_project_files.append(os.path.abspath(os.path.join(_root, _fn)))
 
         type_to_path_full = build_type_to_path_including_nested(_all_project_files)
+        
         loc_cache = {}
 
         def get_method_line_count(
@@ -2100,13 +4265,12 @@ def method_lineage(
         # ============================================================
 
         _import_re = re.compile(
-            r'^\s*import\s+(?:static\s+)?([\w.]+)\s*;',
+            r'^\s*import\s+(?:static\s+)?([\w.*]+)\s*;',
             re.MULTILINE
         )
         _pkg_re = re.compile(r'^\s*package\s+([\w.]+)\s*;', re.MULTILINE)
 
         def _read_cached(fpath):
-            """Return file text from cache, reading from disk if missing."""
             text = file_content_cache.get(fpath)
             if text is None:
                 try:
@@ -2124,10 +4288,6 @@ def method_lineage(
             return text or ""
 
         # ----- Build fqn_to_path -----
-        # type_to_path_full already maps  simple_name -> [path1, path2, ...]
-        # For every path in those lists, extract its package declaration and map
-        # "package.ClassName" -> file_path so import-based resolution works.
-        # _read_cached ensures files not yet in file_content_cache are read now.
         fqn_to_path = {}
         for _simple, _path_list in type_to_path_full.items():
             for _fpath in _path_list:
@@ -2137,128 +4297,266 @@ def method_lineage(
                 _fqn = "{}.{}".format(_pkg, _simple) if _pkg else _simple
                 fqn_to_path.setdefault(_fqn, _fpath)
 
-        # ----- Build file_to_imports -----
-        # Maps caller_file_path -> { simple_name: fqn }
-        # e.g. "/abs/A.java" -> {"OrderService": "com.example.OrderService"}
-        # _read_cached ensures all caller files get imports parsed, even those
-        # that were never added to file_content_cache by the worker result loop.
+        # ----- Build file_to_imports + wildcard imports -----
         file_to_imports = {}
+        file_to_wildcards = {}
         for _fpath in java_files:
             _text = _read_cached(_fpath)
             _imp_map = {}
-            for _fqn in _import_re.findall(_text):
-                _simple = _fqn.split(".")[-1]
-                if _simple and _simple != "*":
-                    _imp_map[_simple] = _fqn
+            _wild = []
+            for _imp in _import_re.findall(_text):
+                _imp = _imp.strip()
+                if not _imp:
+                    continue
+                if _imp.endswith(".*"):
+                    _wild.append(_imp[:-2])
+                    continue
+                _simple = _imp.split(".")[-1]
+                if _simple:
+                    _imp_map[_simple] = _imp
             file_to_imports[_fpath] = _imp_map
+            file_to_wildcards[_fpath] = _wild
 
-        # Normalise caller_file keys: file_to_imports is keyed by abspath;
-        # the file_name column may use a different capitalisation or separator.
-        # Build a lower-case abspath lookup so the get() always hits.
-        _fi_lower = {os.path.normcase(os.path.abspath(k)): v
-                     for k, v in file_to_imports.items()}
-        _fc_lower = {os.path.normcase(os.path.abspath(k)): v
-                     for k, v in file_content_cache.items()
-                     if isinstance(k, str)}
+        _fi_lower = {os.path.normcase(os.path.abspath(k)): v for k, v in file_to_imports.items()}
+        _fw_lower = {os.path.normcase(os.path.abspath(k)): v for k, v in file_to_wildcards.items()}
+        _fc_lower = {
+            os.path.normcase(os.path.abspath(k)): v
+            for k, v in file_content_cache.items()
+            if isinstance(k, str)
+        }
 
-        # DEBUG: print what we have for ConstraintViolations
-        _dbg_key = "ConstraintViolations"
-        print(f"[DEBUG-RESOLVE] type_to_path_full['{_dbg_key}'] = {type_to_path_full.get(_dbg_key)}")
-        _dbg_fqns = [k for k in fqn_to_path if _dbg_key in k]
-        print(f"[DEBUG-RESOLVE] fqn_to_path keys with '{_dbg_key}': {_dbg_fqns}")
+        project_fqn_to_paths = {}
+        for _fpath in _all_project_files:
+            _text = _read_cached(_fpath)
+            _pkg_m = _pkg_re.search(_text)
+            _pkg = _pkg_m.group(1) if _pkg_m else ""
+            _stem = os.path.splitext(os.path.basename(_fpath))[0]
+            _fqn = "{}.{}".format(_pkg, _stem) if _pkg else _stem
+            project_fqn_to_paths.setdefault(_fqn, [])
+            if _fpath not in project_fqn_to_paths[_fqn]:
+                project_fqn_to_paths[_fqn].append(_fpath)
 
-        # ----- Resolver: given caller_file + simple class name → path -----
-        def _resolve_class_path(simple_name, caller_file):
+        _simple_to_paths_ci = {}
+        for _simple, _paths in type_to_path_full.items():
+            _simple_to_paths_ci.setdefault(str(_simple).lower(), [])
+            for _p in _paths:
+                if _p not in _simple_to_paths_ci[str(_simple).lower()]:
+                    _simple_to_paths_ci[str(_simple).lower()].append(_p)
+
+        # Fallback index from real file stems across the full scanned project.
+        # This catches cases where type extraction missed a declaration but the
+        # source file still exists (including generated-sources trees).
+        _stem_to_paths_ci = {}
+        for _p in _all_project_files:
+            _stem = os.path.splitext(os.path.basename(_p))[0].lower()
+            _stem_to_paths_ci.setdefault(_stem, [])
+            if _p not in _stem_to_paths_ci[_stem]:
+                _stem_to_paths_ci[_stem].append(_p)
+
+        def _iter_candidate_paths(simple_name):
+            if not simple_name:
+                return []
+            s = str(simple_name).strip()
+            candidates = list(type_to_path_full.get(s, []))
+            for _p in _simple_to_paths_ci.get(s.lower(), []):
+                if _p not in candidates:
+                    candidates.append(_p)
+
+            # If adapter emits suffixed names (e.g. Foo1), also try canonical Foo.
+            s_nosuffix = re.sub(r'\d+$', '', s)
+            if s_nosuffix and s_nosuffix != s:
+                for _p in type_to_path_full.get(s_nosuffix, []):
+                    if _p not in candidates:
+                        candidates.append(_p)
+                for _p in _simple_to_paths_ci.get(s_nosuffix.lower(), []):
+                    if _p not in candidates:
+                        candidates.append(_p)
+            return candidates
+
+        def _choose_best_candidate(candidates, caller_file, member_name=None):
+            if not candidates:
+                return None
+            if len(candidates) == 1:
+                return candidates[0]
+
+            caller_abs = os.path.normcase(os.path.abspath(caller_file)) if caller_file else None
+            caller_dir = os.path.dirname(caller_abs) if caller_abs else None
+
+            # Prefer candidates that likely declare the requested member.
+            # This is a best-effort text check and avoids expensive reparsing.
+            if member_name:
+                _decl_pat = re.compile(r'\b{}\s*\('.format(re.escape(member_name)))
+                _declared = []
+                for _c in candidates:
+                    _txt = _read_cached(_c)
+                    if _txt and _decl_pat.search(_txt):
+                        _declared.append(_c)
+                if len(_declared) == 1:
+                    return _declared[0]
+                if _declared:
+                    candidates = _declared
+
+            # Prefer nearest file by common directory prefix with caller.
+            if caller_dir:
+                def _score(_p):
+                    _p_norm = os.path.normcase(os.path.abspath(_p))
+                    _main_bonus = 1 if ("{}src{}main{}java{}".format(os.sep, os.sep, os.sep, os.sep) in _p_norm + os.sep) else 0
+                    _test_penalty = -1 if ("{}src{}test{}java{}".format(os.sep, os.sep, os.sep, os.sep) in _p_norm + os.sep) else 0
+                    try:
+                        _common = os.path.commonpath([caller_dir, _p_norm])
+                        return (_main_bonus, _test_penalty, len(_common))
+                    except Exception:
+                        return (_main_bonus, _test_penalty, -1)
+                candidates = sorted(candidates, key=_score, reverse=True)
+            return candidates[0]
+
+        def _resolve_fqn_path(fqn, caller_file, member_name=None):
+            if not isinstance(fqn, str):
+                return None
+            fqn = fqn.strip()
+            if not fqn:
+                return None
+            resolved = fqn_to_path.get(fqn)
+            if resolved:
+                return resolved
+            candidates = list(project_fqn_to_paths.get(fqn, []))
+            return _choose_best_candidate(candidates, caller_file, member_name=member_name)
+
+        def _resolve_class_path(simple_name, caller_file, member_name=None):
+            if not simple_name:
+                return None
+            simple_name = strip_generics(str(simple_name)).strip()
+            if "." in simple_name:
+                simple_name = simple_name.split(".")[-1]
+
             _caller_norm = os.path.normcase(os.path.abspath(caller_file)) if caller_file else ""
 
-            # --- Step 1: explicit import in the caller file ---
+            # Step 1: explicit import
             imp_map = _fi_lower.get(_caller_norm, {})
             fqn = imp_map.get(simple_name)
             if fqn:
-                resolved = fqn_to_path.get(fqn)
+                resolved = _resolve_fqn_path(fqn, caller_file, member_name=member_name)
                 if resolved:
                     return resolved
 
-            # --- Step 2: same-package resolution ---
+            # Step 2: same package
             caller_text = _fc_lower.get(_caller_norm, "") or file_content_cache.get(caller_file, "")
             caller_pkg_m = _pkg_re.search(caller_text)
             if caller_pkg_m:
                 caller_pkg = caller_pkg_m.group(1)
                 same_pkg_fqn = "{}.{}".format(caller_pkg, simple_name)
-                resolved = fqn_to_path.get(same_pkg_fqn)
+                resolved = _resolve_fqn_path(same_pkg_fqn, caller_file, member_name=member_name)
+                if resolved:
+                    return resolved
+            # same-directory-file check (same package no import needed)
+            if caller_file:
+                _caller_dir = os.path.dirname(os.path.abspath(caller_file))
+                for _ext in valid_extensions:
+                    _candidate_path = os.path.join(_caller_dir, "{}{}".format(simple_name, _ext))
+                    if os.path.isfile(_candidate_path):
+                        return _candidate_path
+                        
+            # Step 3: wildcard imports
+            for pkg in _fw_lower.get(_caller_norm, []):
+                wfqn = "{}.{}".format(pkg, simple_name)
+                resolved = _resolve_fqn_path(wfqn, caller_file, member_name=member_name)
                 if resolved:
                     return resolved
 
-            # --- Step 3 & 4: fall back to type_to_path_full ---
-            candidates = type_to_path_full.get(simple_name, [])
-            if candidates:
-                return candidates[0]
+            # Step 4: simple-name candidates + disambiguation.
+            candidates = _iter_candidate_paths(simple_name)
+            best = _choose_best_candidate(candidates, caller_file, member_name=member_name)
+            if best:
+                return best
 
-            # --- Step 5: scan fqn_to_path for any FQN ending with .ClassName ---
+            # Step 5: suffix scan fallback
             _suffix = ".{}".format(simple_name)
-            for _fqn, _fpath in fqn_to_path.items():
-                if _fqn.endswith(_suffix):
-                    return _fpath
+            _suffix_hits = [_fpath for _fqn, _fpath in fqn_to_path.items() if _fqn.endswith(_suffix)]
+            best = _choose_best_candidate(_suffix_hits, caller_file, member_name=member_name)
+            if best:
+                return best
+
+            # Step 6: filename-stem fallback (exact, case-insensitive)
+            stem_hits = list(_stem_to_paths_ci.get(simple_name.lower(), []))
+
+            # Also try canonicalized stem variants for suffixed class names
+            # e.g. ExtendedFoo -> ExtendedFoo1.java or ExtendedFoo2.java.
+            if not stem_hits:
+                _raw = simple_name.lower()
+                _nosuffix = re.sub(r'\d+$', '', _raw)
+                for _stem, _paths in _stem_to_paths_ci.items():
+                    if _stem == _raw or (_nosuffix and _stem == _nosuffix):
+                        for _p in _paths:
+                            if _p not in stem_hits:
+                                stem_hits.append(_p)
+                    elif _nosuffix and _stem.startswith(_nosuffix) and _stem[len(_nosuffix):].isdigit():
+                        for _p in _paths:
+                            if _p not in stem_hits:
+                                stem_hits.append(_p)
+
+            best = _choose_best_candidate(stem_hits, caller_file, member_name=member_name)
+            if best:
+                return best
 
             return None
 
-        # ----- Enrichment functions (import-aware) -----
         _base_class_re = re.compile(r'^([A-Za-z_]\w*)\.(.*)', re.DOTALL)
+        _caller_varmap_cache = {}
 
         def _strip_extension(path_str):
-            """Remove file extension from a path string e.g. /a/b/Order.java -> /a/b/Order"""
             if not isinstance(path_str, str):
                 return path_str
             root, _ = os.path.splitext(path_str)
             return root
 
         def _enrich_call_with_path(call_str, caller_file, fallback_class_name=None):
-            """
-            Replace the base class/variable token in a call string with the
-            resolved file path (extension stripped) of that class.
-
-            Handles two cases:
-              UpperCase base  — direct class reference  e.g. Payment.method()
-              lowercase base  — variable name; resolve via object_class_map first,
-                                then fall back to fallback_class_name if provided.
-            """
             if not isinstance(call_str, str):
                 return call_str
             m = _base_class_re.match(call_str.strip())
             if not m:
                 return call_str
+
             cls_name = m.group(1)
             rest = m.group(2)
+            member_name = rest.split(".")[0].strip() if rest else None
+            if member_name:
+                member_name = member_name.split("(")[0].strip()
 
-            if cls_name[0].isupper():
-                # Direct UpperCamelCase class reference — resolve path directly.
-                resolved = _resolve_class_path(cls_name, caller_file)
-                if resolved:
-                    return "{}.{}".format(_strip_extension(resolved), rest)
-                return call_str
+            if cls_name and cls_name[0].isupper():
+                resolved = _resolve_class_path(cls_name, caller_file, member_name=member_name)
+                return "{}.{}".format(_strip_extension(resolved), rest) if resolved else call_str
+
+            # lowercase object variable -> resolve declared type first
+            _caller_norm = os.path.normcase(os.path.abspath(caller_file)) if caller_file else ""
+            caller_text = _fc_lower.get(_caller_norm, "") or file_content_cache.get(caller_file, "")
+            var_map = _caller_varmap_cache.get(_caller_norm)
+            if var_map is None:
+                var_map = _build_var_map(caller_text or "")
+                _caller_varmap_cache[_caller_norm] = var_map
+
+            mapped_cls = (
+                var_map.get(cls_name)
+                or object_class_map.get((caller_file.lower(), cls_name.lower()))
+                or object_class_map.get(cls_name.lower())
+            )
+
+            if mapped_cls:
+                mapped_cls = strip_generics(mapped_cls)
+                # For dotted types like "OuterClass.InnerClass" the class that
+                # owns the object is always the FIRST segment (class_1), not
+                # the last.  e.g. final PaymentOrderSpec.PaymentOrderSpecBuilder
+                # obj → obj's class is PaymentOrderSpec, not PaymentOrderSpecBuilder.
+                if "." in mapped_cls:
+                    mapped_cls = mapped_cls.split(".")[0]
+            elif fallback_class_name:
+                mapped_cls = fallback_class_name
             else:
-                # Lowercase variable name — look up its declared type via
-                # object_class_map (scoped to this file first, then global).
-                mapped_cls = (
-                    object_class_map.get((caller_file.lower(), cls_name.lower()))
-                    or object_class_map.get(cls_name.lower())
-                )
-                if mapped_cls:
-                    mapped_cls = strip_generics(mapped_cls)
-                elif fallback_class_name:
-                    # Caller passed an already-resolved UpperCamelCase class name
-                    # (e.g. the base extracted from class_method_call).
-                    mapped_cls = fallback_class_name
-                else:
-                    return call_str
+                return call_str
 
-                resolved = _resolve_class_path(mapped_cls, caller_file)
-                if resolved:
-                    return "{}.{}".format(_strip_extension(resolved), rest)
-                # Even if we can't get a full path, at least replace the
-                # variable token with the proper class name so the call is
-                # readable (e.g. "orderService.save()" → "OrderService.save()").
-                return "{}.{}".format(mapped_cls, rest)
+            resolved = _resolve_class_path(mapped_cls, caller_file, member_name=member_name)
+            if resolved:
+                return "{}.{}".format(_strip_extension(resolved), rest)
+            return "{}.{}".format(mapped_cls, rest)
 
         # Apply row-wise (caller_file comes from the file_name column)
         _records = df_clean_exploded[
@@ -2303,64 +4601,6 @@ def method_lineage(
         df_clean_exploded["object_call"]          = _enriched_oc
         df_clean_exploded["class_method_call"]    = _enriched_cmc
 
-        # -----------------------------------------------------------
-        # Copy callee source files into reachable_sources.
-        # class_method_call after enrichment has the form:
-        #   "path/to/ClassName.methodName()"
-        # The base (everything before the first ".method") is the
-        # extension-stripped file path of the callee.  Re-attach the
-        # configured source extension and copy each unique file.
-        # This is the definitive copy — driven by the correctly resolved
-        # paths, not by the early BFS which used setdefault and could
-        # pick the wrong file when the same class name existed in multiple
-        # packages.
-        # -----------------------------------------------------------
-        _ext = details.get("extension", [".java"])[0]
-
-        def _cmc_to_filepath(cmc):
-            """
-            Extract the file path from an enriched class_method_call string.
-            e.g. "/abs/path_2/Payment.method()" -> "/abs/path_2/Payment.java"
-            The base path is everything up to (but not including) the last
-            dot-separated token that looks like a method name.
-            """
-            if not isinstance(cmc, str):
-                return None
-            # Split on "." and drop the last token (method name)
-            # e.g. "/abs/path_2/Payment.method()" -> ["/abs/path_2/Payment", "method()"]
-            parts = cmc.split(".")
-            if len(parts) < 2:
-                return None
-            base = ".".join(parts[:-1])   # everything except the method token
-            # Only treat as a path if it contains a path separator
-            if os.sep not in base and "/" not in base:
-                return None
-            return base + _ext
-
-        _cmc_paths = (
-            df_clean_exploded["class_method_call"]
-            .dropna()
-            .apply(_cmc_to_filepath)
-            .dropna()
-            .unique()
-        )
-
-        # Also include the caller files (file_name column)
-        _caller_paths = df_clean_exploded["file_name"].dropna().unique()
-
-        _all_paths_to_copy = set(_cmc_paths) | set(_caller_paths)
-
-        _copied = 0
-        for _fp in _all_paths_to_copy:
-            if os.path.isfile(_fp):
-                try:
-                    shutil.copy2(_fp, os.path.join(_sources_dir, os.path.basename(_fp)))
-                    _copied += 1
-                except Exception as _copy_err:
-                    log_time(f"Could not copy {_fp}: {_copy_err}")
-
-        log_time(f"Copied {_copied} source files to {_sources_dir} (from class_method_call paths)")
-
         df_application_properties = adapter.extract_application_properties_from_folder(app_folder)
 
         excel_path = os.path.join(OUTPUT_DIR,all_methods)
@@ -2373,6 +4613,71 @@ def method_lineage(
             df_clean_exploded.to_excel(writer,sheet_name="Cleaned_AST_Details",index=False)
             df_application_properties.to_excel(writer,sheet_name="application.properties",index=False)
 
+        # -----------------------------------------------------------
+        # Populate reachable_sources from generated Excel.
+        # Read Cleaned_AST_Details and collect source file paths from:
+        #   1) class_method_call   (path/to/Class.method() -> path/to/Class.java)
+        #   2) class_interface_name (path/to/Class -> path/to/Class.java)
+        # -----------------------------------------------------------
+        _ext = details.get("extension", [".java"])[0]
+
+        def _looks_like_path(value):
+            if not isinstance(value, str):
+                return False
+            value = value.strip()
+            if not value:
+                return False
+            return (os.sep in value) or ("/" in value) or ("\\" in value)
+
+        def _to_source_file_path(value, from_method_call=False):
+            if not isinstance(value, str):
+                return None
+            raw = value.strip()
+            if not raw or not _looks_like_path(raw):
+                return None
+
+            base = raw
+            if from_method_call:
+                parts = raw.split(".")
+                if len(parts) < 2:
+                    return None
+                base = ".".join(parts[:-1]).strip()
+                if not _looks_like_path(base):
+                    return None
+
+            _, existing_ext = os.path.splitext(base)
+            if existing_ext in valid_extensions:
+                return os.path.abspath(base)
+            return os.path.abspath(base + _ext)
+
+        _excel_cleaned = pd.read_excel(excel_path, sheet_name="Cleaned_AST_Details")
+
+        _paths_to_copy = set()
+
+        if "class_method_call" in _excel_cleaned.columns:
+            for _val in _excel_cleaned["class_method_call"].dropna().tolist():
+                _fp = _to_source_file_path(_val, from_method_call=True)
+                if _fp:
+                    _paths_to_copy.add(_fp)
+
+        if "class_interface_name" in _excel_cleaned.columns:
+            for _val in _excel_cleaned["class_interface_name"].dropna().tolist():
+                _fp = _to_source_file_path(_val, from_method_call=False)
+                if _fp:
+                    _paths_to_copy.add(_fp)
+
+        _copied = 0
+        for _fp in _paths_to_copy:
+            if os.path.isfile(_fp):
+                try:
+                    shutil.copy2(_fp, os.path.join(_sources_dir, os.path.basename(_fp)))
+                    _copied += 1
+                except Exception as _copy_err:
+                    log_time(f"Could not copy {_fp}: {_copy_err}")
+
+        log_time(f"Copied {_copied} source files to {_sources_dir} (from Excel Cleaned_AST_Details)")
+        
+        
         # ── Checkpoint 100% ──
         _pbar_goto(100, f"Done -> {os.path.basename(excel_path)}")
         _pbar.close()
@@ -2401,6 +4706,9 @@ def method_lineage(
     _index_executor.shutdown(wait=True)
 
     all_methods = clean_and_write(df_results, _prebuilt_ocm, _prebuilt_mri)
+    
+    
+    
     end_time = datetime.now()
 
     elapsed = (end_time - start_time).total_seconds()

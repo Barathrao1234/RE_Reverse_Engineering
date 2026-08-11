@@ -1,4 +1,3 @@
-print(f"[DEBUG] app_folder = {app_folder}")
-print(f"[DEBUG] The 2 files found:")
-for _fp in _all_project_files_early:
-    print(f"  {_fp}")
+ print(f"[DEBUG] fpath={os.path.basename(fpath)}, tree={tree is not False and bool(tree)}, cache_len={len(file_content_cache.get(fpath,''))}")
+
+  print(f"[DEBUG] fpath={os.path.basename(fpath)}, tree={tree is not False and bool(tree)}, cache_len={len(file_content_cache.get(fpath,''))}")

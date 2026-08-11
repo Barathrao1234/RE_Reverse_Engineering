@@ -2533,12 +2533,12 @@ def method_lineage(
     #   final ObjectService request  <-- passed as argument
     _field_decl_re = re.compile(
         r'''
-        (?:@\w+(?:\([^)]*\))?\s*)*                                                       # annotations e.g. @Autowired
-        (?:(?:private|public|protected|static|final|transient|volatile)\s+)*             # modifiers
-        ((?:[a-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)*(?:<[^>]+>)?)  # fully qualified OR ClassName OR Outer.Inner
+        (?:@\w+(?:\([^)]*\))?\s*)*                                    # annotations e.g. @Autowired
+        (?:(?:private|public|protected|static|final|transient|volatile)\s+)*  # modifiers
+        ([A-Z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)*(?:<[^>]+>)?)     # ClassName OR nested type
         \s+
-        ([a-z][A-Za-z0-9_]*)                                                             # variableName (lowercase start)
-        \s*(?:[=;,)])                                                                     # followed by = ; , or )
+        ([a-z][A-Za-z0-9_]*)                                            # variableName (lowercase start)
+        \s*(?:[=;,)])                                                   # followed by = ; , or )
         ''',
         re.MULTILINE | re.VERBOSE
     )
@@ -2931,6 +2931,30 @@ def method_lineage(
                 return _resolve_class_for_method(parent, method_name, _visited)
             return class_name              # not found — keep original
 
+        def _get_return_type(class_name, method_name, _visited=None):
+            """
+            Walk the inheritance chain (via __extends__) to find the return type
+            of method_name declared in class_name or any ancestor.
+            Returns the return-type string, or None if not found / void / constructor.
+            """
+            if not class_name or not method_name:
+                return None
+            if _visited is None:
+                _visited = set()
+            if class_name in _visited:
+                return None   # cycle guard
+            _visited.add(class_name)
+            entry = method_return_index.get(class_name, {})
+            if method_name in entry:
+                ret = entry[method_name]
+                if ret and str(ret).lower() not in ('void', '<constructor>'):
+                    return str(ret)
+                return None
+            parent = entry.get("__extends__")
+            if parent and parent != class_name:
+                return _get_return_type(parent, method_name, _visited)
+            return None
+
         # ------------------------------------------------------------------
         # Case 2 helper — field-access chain resolution
         # ------------------------------------------------------------------
@@ -3104,8 +3128,8 @@ def method_lineage(
                 owning_class = _normalize_owner_class_for_member(current_class, m)
                 owning_class = _resolve_class_for_method(strip_generics(owning_class), m)
                 chain_render.append("{}.{}()".format(strip_generics(owning_class), m))
-                ret_type = method_return_index.get(owning_class, {}).get(m)
-                if not ret_type or str(ret_type).lower() in ('void', '<constructor>'):
+                ret_type = _get_return_type(owning_class, m)
+                if not ret_type:
                     break
                 current_class = strip_generics(str(ret_type).split('.')[-1])
             return ".".join(chain_render)
@@ -3172,8 +3196,8 @@ def method_lineage(
                 owning_class = _normalize_owner_class_for_member(current_class, mtd)
                 owning_class = _resolve_class_for_method(strip_generics(owning_class), mtd)
                 segments.append("{}.{}()".format(strip_generics(owning_class), mtd))
-                ret_type = method_return_index.get(owning_class, {}).get(mtd)
-                if not ret_type or str(ret_type).lower() in ("void", "<constructor>"):
+                ret_type = _get_return_type(owning_class, mtd)
+                if not ret_type:
                     break
                 current_class = strip_generics(str(ret_type).split(".")[-1])
             return segments

@@ -455,18 +455,32 @@ def expand_lineage_horizontal(
 
     # ---------- External / unresolved method ----------
     if orig_row is None:
-        ext_line_count = method_line_map.get(
-            (classname.lower(), methodname.lower()), 0
-        )
         display_cls = os.path.splitext(os.path.basename(classname))[0]
+        ext_line_count = method_line_map.get(
+            (classname.lower(), methodname.lower())
+        )
+        if ext_line_count is None:
+            ext_line_count = method_line_map.get(
+                (display_cls.lower(), methodname.lower()), 0
+            )
         external_node = f"{display_cls}.{methodname} no_of_lines : {ext_line_count}"
         return [[external_node]]
 
     # ---------- Build node ----------
-    line_count = method_line_map.get(
-        (classname.lower(), methodname.lower()), 0
-    )
+    # method_line_map keys come from the Methods sheet's class_method_key
+    # column, which stores the SHORT class name (no path) — e.g.
+    # "AbstractPageRequest.getPageSize" — while `classname` here is the
+    # FULL file path (no extension) from Cleaned_AST_Details. Try the
+    # full-path key first (in case it ever matches), then fall back to
+    # the basename key, which is what actually matches in practice.
     display_cls = os.path.splitext(os.path.basename(classname))[0]
+    line_count = method_line_map.get(
+        (classname.lower(), methodname.lower())
+    )
+    if line_count is None:
+        line_count = method_line_map.get(
+            (display_cls.lower(), methodname.lower()), 0
+        )
     node_name = f"{display_cls}.{methodname} no_of_lines : {line_count}"
 
     # Max depth guard
@@ -645,11 +659,11 @@ def load_method_line_counts_from_excel(excel_path, sheet_name="Methods"):
 
         # class_method_key format: "full_path_without_ext.methodname"
         # Use rsplit so the method is always the last segment
-        path_part, methodname = class_method.rsplit(".", 1)
-        classname = os.path.splitext(os.path.basename(path_part))[0]
-        try:
-            method_line_map[(classname.lower(), methodname.lower())] = int(line_count) if line_count not in (None, "", "nan") and str(line_count).strip() not in ("", "nan", "None") else None
-        except (ValueError, TypeError):
+        path_part, methodname = class_method.rsplit(".", 1) 
+        classname = path_part # ← keep full path, not just basename 
+        try: 
+            method_line_map[(classname.lower(), methodname.lower())] = int(line_count) if line_count not in (None, "", "nan") and str(line_count).strip() not in ("", "nan", "None") else None 
+        except (ValueError, TypeError): 
             method_line_map[(classname.lower(), methodname.lower())] = None
     return method_line_map
 
@@ -820,11 +834,14 @@ def generate_method_level_hierarchy(
             )
 
             # ---------- Force root visibility ----------
-            root_line_count = method_line_map.get(
-                (classname.lower(), methodname.lower()), 0
-            )
-
             display_classname = os.path.splitext(os.path.basename(classname))[0]
+            root_line_count = method_line_map.get(
+                (classname.lower(), methodname.lower())
+            )
+            if root_line_count is None:
+                root_line_count = method_line_map.get(
+                    (display_classname.lower(), methodname.lower()), 0
+                )
             root_node = f"{display_classname}.{methodname} no_of_lines : {root_line_count}"
 
             if not paths:

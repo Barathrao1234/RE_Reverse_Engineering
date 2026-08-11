@@ -2533,12 +2533,12 @@ def method_lineage(
     #   final ObjectService request  <-- passed as argument
     _field_decl_re = re.compile(
         r'''
-        (?:@\w+(?:\([^)]*\))?\s*)*                                    # annotations e.g. @Autowired
-        (?:(?:private|public|protected|static|final|transient|volatile)\s+)*  # modifiers
-        ([A-Z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)*(?:<[^>]+>)?)     # ClassName OR nested type
+        (?:@\w+(?:\([^)]*\))?\s*)*                                                       # annotations e.g. @Autowired
+        (?:(?:private|public|protected|static|final|transient|volatile)\s+)*             # modifiers
+        ((?:[a-z][A-Za-z0-9_]*\.)*[A-Z][A-Za-z0-9_]*(?:\.[A-Z][A-Za-z0-9_]*)*(?:<[^>]+>)?)  # fully qualified OR ClassName OR Outer.Inner
         \s+
-        ([a-z][A-Za-z0-9_]*)                                            # variableName (lowercase start)
-        \s*(?:[=;,)])                                                   # followed by = ; , or )
+        ([a-z][A-Za-z0-9_]*)                                                             # variableName (lowercase start)
+        \s*(?:[=;,)])                                                                     # followed by = ; , or )
         ''',
         re.MULTILINE | re.VERBOSE
     )

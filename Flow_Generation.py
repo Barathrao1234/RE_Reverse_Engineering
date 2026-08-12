@@ -454,11 +454,14 @@ def expand_lineage_horizontal(
     # ──────────────────────────────────────────────────────────────────────────
 
     # ---------- External / unresolved method ----------
-    # Display label uses the full path (classname from Cleaned_AST_Details).
-    # Line-count lookup uses only the short class name (basename, no ext)
-    # because method_line_map is keyed that way (Methods sheet has no paths).
+    # Display label = full classname as-is (full path or short, whatever AST has).
+    # Line-count lookup = short class name only, because Methods sheet keys are
+    # always "ShortClass.method" with no path.
+    # Use ntpath so Windows backslash paths are parsed correctly on any OS.
+    import ntpath
     display_cls = classname
-    short_cls = os.path.splitext(os.path.basename(classname))[0]
+    _basename = ntpath.basename(classname) or posixpath.basename(classname) if classname else classname
+    short_cls = os.path.splitext(_basename)[0] if _basename else classname
 
     if orig_row is None:
         ext_line_count = method_line_map.get(
@@ -841,8 +844,10 @@ def generate_method_level_hierarchy(
             )
 
             # ---------- Force root visibility ----------
+            import ntpath
             display_classname = classname
-            short_classname = os.path.splitext(os.path.basename(classname))[0]
+            _bn = ntpath.basename(classname) or os.path.basename(classname)
+            short_classname = os.path.splitext(_bn)[0] if _bn else classname
             root_line_count = method_line_map.get(
                 (short_classname.lower(), methodname.lower()), 0
                 )

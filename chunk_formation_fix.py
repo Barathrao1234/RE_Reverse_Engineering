@@ -1179,6 +1179,16 @@ def chunks_formation(INPUT_PATH, program_or_process="program"):
     final_unique, final_usages = _finalize_chunks(chunks_unique, chunk_usages)
     chunks_df = pd.DataFrame(final_unique)
 
+    print(f"\n[INFO] Total chunks formed: {len(chunks_df)}")
+    if not chunks_df.empty:
+        print(f"[INFO] code_sum per chunk:")
+        for _, r in chunks_df[["chunk_id", "code_sum"]].iterrows():
+            print(f"    {r['chunk_id']}: {r['code_sum']}")
+        print(f"[INFO] Total code_sum across all chunks: {chunks_df['code_sum'].sum()}")
+        print(f"[INFO] Max code_sum among chunks: {chunks_df['code_sum'].max()} "
+              f"(CHUNK_LIMIT = {CHUNK_LIMIT})")
+
+
     if not chunks_df.empty:
         if "parent_node" not in chunks_df.columns:
             chunks_df["parent_node"] = "Chunk under " + chunks_df.get("trigger_node", "")

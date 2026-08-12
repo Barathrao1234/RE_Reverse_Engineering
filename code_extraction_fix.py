@@ -3091,75 +3091,49 @@ def _rewind_to_method_start(text: str, sig_start: int) -> int:
 
 def _trim_to_signature_with_annotations(snippet: str, method_name: str) -> str:
     """
-    Trim the snippet so it starts at the actual method *definition* line
-    (not a call site or a return statement that happens to contain the method name).
+    Trim the snippet so it starts at the actual method *definition* line,
+    not at a call site or return statement that happens to contain the name.
 
-    A definition line must have at least one access/return-type token before
-    the method name.  Call sites (return foo(...), foo(...);, etc.) are skipped.
+    Strategy: scan lines one by one and find the first line that has
+    at least one modifier keyword (public/private/protected/static/…) before
+    the method name.  Using modifiers-only (not a "return type" alternative)
+    avoids false positives such as "return methodName();" where "return" would
+    otherwise be mistaken for a return type.
     """
     if not snippet:
         return snippet
 
     lines = snippet.splitlines(True)
 
-    # Strict definition pattern: requires a modifier OR a return-type word
-    # immediately before the method name.  This prevents matching
-    #   return methodName(...)
-    #   someVar = methodName(...)
-    # while still catching:
-    #   public void methodName(...)
-    #   private static String methodName(...)
-    #   List<Foo> methodName(...)
-    sig_pattern = re.compile(
-        rf"""(?mx)
-        ^\s*(?:f\d+_\d+\s+)?                      # optional line-id token
-        (?:@\s*[\w.$]+(?:\s*\([^)]*\))?\s*)*       # optional annotations (same line)
+    # Requires at least one access/behaviour modifier before the method name.
+    # This reliably excludes call sites and return statements.
+    _MODIFIER_DEF_RE = re.compile(
+        rf"""(?x)
+        ^\s*(?:f\d+_\d+\s+)?                        # optional line-id token
+        (?:@\s*[\w.$]+(?:\s*\([^)]*\))?\s*)*         # optional same-line annotations
         (?:
-            # At least one modifier keyword before the method name
             (?:public|protected|private|internal|static|final|abstract|
                synchronized|native|strictfp|default|sealed|virtual|override|
                extern|unsafe|async|new|partial)
             \s+
-        )+
-        (?:[\w.$<>\[\],\s]+?\s+)?                  # optional return type
-        \b{re.escape(method_name)}\s*\(
-        |
-        ^\s*(?:f\d+_\d+\s+)?                      # OR: no modifier but explicit return type
-        (?:@\s*[\w.$]+(?:\s*\([^)]*\))?\s*)*
-        [\w.$][\w.$<>\[\],]*(?:\s*\[\s*\])*\s+    # return type (must start with word char)
-        \b{re.escape(method_name)}\s*\(
-        """
+        )+                                            # ONE OR MORE modifiers required
+        .*\b{re.escape(method_name)}\s*\(            # followed by the method name
+        """,
+        re.MULTILINE
     )
 
-    sig_text = "".join(lines)
+    def_line_idx = None
+    for i, line in enumerate(lines):
+        if _MODIFIER_DEF_RE.match(line):
+            def_line_idx = i
+            break
 
-    # Find the FIRST line that looks like a real definition (not a call site)
-    best_match = None
-    for m in sig_pattern.finditer(sig_text):
-        # Double-check: the matched line must NOT end with ');' or just ')'
-        # (those are call/return sites, not definitions)
-        line_start = sig_text.rfind("\n", 0, m.start()) + 1
-        line_end = sig_text.find("\n", m.start())
-        if line_end == -1:
-            line_end = len(sig_text)
-        line_text = sig_text[line_start:line_end].strip()
-        # Skip call-site patterns
-        if line_text.endswith(");") or line_text.endswith(")"):
-            # Allow if the line also has '{' after ')' — that's a one-liner body
-            if "{" not in line_text:
-                continue
-        best_match = m
-        break  # First valid definition match wins
-
-    if not best_match:
-        # Fallback: return as-is (strip leading blank lines only)
+    if def_line_idx is None:
+        # No definition line found — return as-is (lstripped)
         return snippet.lstrip()
 
-    upto = sig_text[:best_match.start()]
-    start_line_idx = upto.count("\n")
-
-    # Walk back to include any annotation lines that precede the signature
-    keep_from = start_line_idx
+    # Walk back to include any annotation lines (@Override etc.) before the definition
+    keep_from = def_line_idx
     while keep_from - 1 >= 0:
         prev_line = lines[keep_from - 1]
         if re.match(r"^\s*(?:f\d+_\d+\s+)?@\w", prev_line) or prev_line.strip() == "":
@@ -3168,7 +3142,7 @@ def _trim_to_signature_with_annotations(snippet: str, method_name: str) -> str:
         break
 
     trimmed = "".join(lines[keep_from:])
-    # Strip any stray closing-brace lines that leaked in before the definition
+    # Strip any stray closing-brace lines that leaked before the definition
     trimmed = re.sub(r"^(?:\s*}\s*\n)+", "", trimmed)
     return trimmed
 
@@ -3360,21 +3334,41 @@ def extract_method_code(file_name: str,text: str, method_name: str, lang: str,PA
     )
 
     def _is_definition_match(m: re.Match, src: str) -> bool:
-        """Return True only if the match starts on a method-definition line (not a call site)."""
-        # Find the start of the line containing the match
-        line_start = src.rfind("\n", 0, m.start()) + 1
-        line_end   = src.find("\n", m.start())
-        if line_end == -1:
-            line_end = len(src)
-        line = src[line_start:line_end]
+        """Return True only if the match contains an actual method *definition* line.
 
-        # A call site ends with ');' or just ')' — no opening brace on this or next line
-        stripped = line.strip()
-        if stripped.endswith(");") or stripped.endswith(");"):
-            return False
+        The DOTALL regex can match a span that STARTS at a call site
+        (e.g. "return getValue();") and ENDS at the real definition, because
+        the params group is ([\s\S]*?) and greedily absorbs the intervening code.
 
-        # Must have a modifier or return type before the method name
-        return bool(_DEFINITION_LINE_RE.match(line))
+        Checking only the first non-blank line of the match therefore gives the
+        call-site line, causing the definition to be dropped and the fallback to
+        then latch onto the call site.
+
+        Fix: scan EVERY line in the match and return True as soon as any line
+        looks like a real definition (has at least one access/visibility modifier
+        before the method name).  Using modifiers-only (not the "return type"
+        alternative) avoids false positives from statements like
+        "return methodName();" where "return" would otherwise look like a type.
+        """
+        _MODIFIER_DEF_RE = re.compile(
+            r"""(?x)
+            ^\s*(?:f\d+_\d+\s+)?
+            (?:@\s*[\w.$]+(?:\s*\([^)]*\))?\s*)*   # optional same-line annotations
+            (?:
+                (?:public|protected|private|internal|static|final|abstract|
+                   synchronized|native|strictfp|default|sealed|virtual|override|
+                   extern|unsafe|async|new|partial)
+                \s+
+            )+                                       # ONE OR MORE modifiers required
+            """,
+            re.MULTILINE
+        )
+
+        match_text = m.group()
+        for raw_line in match_text.splitlines():
+            if _MODIFIER_DEF_RE.match(raw_line):
+                return True
+        return False
 
     all_matches: dict = {}  # start_pos -> (match, brace_on_same_line)
     for pat, brace_same in patterns:
@@ -3388,15 +3382,41 @@ def extract_method_code(file_name: str,text: str, method_name: str, lang: str,PA
         The extraction window is:
           [definition_line_start .. closing_brace]
 
-        _rewind_to_method_start is called starting from the *beginning of the
-        line* that contains the signature match.  This prevents it from
-        walking backwards into code that belongs to a previous method or into
-        a return/call expression that happens to contain the method name.
+        The DOTALL + VERBOSE regex often begins its match at a preceding blank
+        line or newline character, so match.start() does NOT reliably point to
+        the actual signature line.  We skip over any leading whitespace/newlines
+        inside the match text to find the real first content position, then
+        anchor to the start of THAT line before calling _rewind_to_method_start.
         """
-        # Anchor to the start of the line where the signature begins.
-        # Do NOT use match.start() directly — the regex can match in the middle
-        # of a line (e.g. inside "return methodName(...)").
-        line_begin = text.rfind("\n", 0, match.start())
+        # The DOTALL regex may span from a call-site line all the way to the
+        # definition line (e.g. match starts at "return getValue();" and ends
+        # at "public String getValue() {").  We must find the actual definition
+        # line WITHIN the match and anchor to that, not to match.start().
+        _MODIFIER_DEF_RE_LOCAL = re.compile(
+            r"""(?x)
+            ^\s*(?:f\d+_\d+\s+)?
+            (?:@\s*[\w.$]+(?:\s*\([^)]*\))?\s*)*
+            (?:
+                (?:public|protected|private|internal|static|final|abstract|
+                   synchronized|native|strictfp|default|sealed|virtual|override|
+                   extern|unsafe|async|new|partial)
+                \s+
+            )+
+            """,
+            re.MULTILINE
+        )
+        match_text = match.group()
+        abs_pos = match.start()
+        def_line_pos = None
+        for raw_line in match_text.splitlines(True):
+            if _MODIFIER_DEF_RE_LOCAL.match(raw_line):
+                def_line_pos = abs_pos
+                break
+            abs_pos += len(raw_line)
+
+        # Anchor to the start of the definition line (or match.start() as fallback)
+        real_sig_pos = def_line_pos if def_line_pos is not None else match.start()
+        line_begin = text.rfind("\n", 0, real_sig_pos)
         line_begin = 0 if line_begin == -1 else line_begin + 1
 
         # Walk back to pick up any preceding annotation lines (@Override etc.)

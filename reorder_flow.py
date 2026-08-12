@@ -1,18 +1,21 @@
-
 import os
 import re
-import sys
 import openpyxl
 from openpyxl.styles import Alignment
+from collections import defaultdict
+from datetime import datetime
 
 # ─────────────────────────────────────────────
-#  CONFIG
+#  CONFIG  ← edit these paths before running
 # ─────────────────────────────────────────────
-INPUT_EXCEL  = r"path/to/007_2_Method_Detailed_Flow_Occurrence_Distribution.xlsx"
-SRC_ROOT     = r"path/to/java/source/root"
-OUTPUT_EXCEL = r"path/to/007_2_Method_Detailed_Flow_Occurrence_Distribution_REORDERED.xlsx"
-SRC_EXT      = ".java"
-SRC_ENCODING = "utf-8"
+SRC_EXT      = ".java"    # change to .py / .cs / .kt etc. if needed
+SRC_ENCODING = "utf-8"    # fallback to latin-1 is handled automatically
+
+
+
+def log_time(message):
+    with open("Reordering.txt", "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now()} - {message}\n")
 
 
 # ─────────────────────────────────────────────
@@ -177,7 +180,12 @@ def extract_classmethod(cell_value):
     if "." not in base:
         return None
     parts = base.rsplit(".", 1)
-    return (parts[0].lower(), parts[1].lower())
+    method = parts[1].lower()
+    full_class_path = parts[0]
+    # decl_rank_map / call_order_map are keyed by the bare filename (class)
+    # e.g. "com.foo.TradeSLSBBean" -> "tradeslsbbean", not the full dotted path.
+    simple_class = full_class_path.rsplit(".", 1)[-1].lower()
+    return (simple_class, method)
 
 
 def get_decl_rank(cell_value, decl_rank_map):
@@ -305,23 +313,53 @@ def write_original_flow_sheet(wb, sorted_groups, n_cols):
                     prev[d] = None
         ws.append(out)
 
-    merge_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    merge_align = Alignment(
+        horizontal="center",
+        vertical="center",
+        wrap_text=True
+    )
+
     data = list(ws.iter_rows(min_row=2, values_only=True))
+
     for ci in range(n_cols):
+
         r = 0
+
         while r < len(data):
+
             val = data[r][ci]
+
             if val is None:
                 r += 1
                 continue
-            end = r + 1
-            while end < len(data) and data[end][ci] == val:
-                end += 1
-            if end - r > 1:
-                ws.merge_cells(start_row=r+2, start_column=ci+1,
-                                end_row=end+1, end_column=ci+1)
-                ws.cell(r+2, ci+1).alignment = merge_align
-            r = end
+
+            start = r
+
+            next_filled = r + 1
+
+            # find next non-empty cell in same column
+            while next_filled < len(data):
+                if data[next_filled][ci] is not None:
+                    break
+                next_filled += 1
+
+            end = next_filled - 1
+
+            # if this is the last filled value in column
+            if next_filled >= len(data):
+                end = len(data) - 1
+
+            if end > start:
+                ws.merge_cells(
+                    start_row=start + 2,
+                    start_column=ci + 1,
+                    end_row=end + 2,
+                    end_column=ci + 1
+                )
+
+                ws.cell(start + 2, ci + 1).alignment = merge_align
+
+            r = next_filled
 
     for col_cells in ws.columns:
         w = max((len(str(c.value)) for c in col_cells if c.value), default=10)
@@ -333,13 +371,15 @@ def write_original_flow_sheet(wb, sorted_groups, n_cols):
 # ─────────────────────────────────────────────
 #  MAIN
 # ─────────────────────────────────────────────
-def main():
+def reorder_flow(INPUT_EXCEL,SRC_ROOT,OUTPUT_EXCEL):
     print(f"\n{'='*60}")
     print(f"Input  : {INPUT_EXCEL}")
     print(f"Source : {SRC_ROOT}")
     print(f"Output : {OUTPUT_EXCEL}")
     print(f"{'='*60}\n")
-
+    start_time = datetime.now()
+    log_time(f"Chunk Formation START")
+    start_level = 0  # default: column 1
     decl_rank_map, call_order_map = build_codebase_order(SRC_ROOT, SRC_EXT, SRC_ENCODING)
 
     print("\n[excel] Loading workbook …")
@@ -357,7 +397,10 @@ def main():
     print(f"\n[save] Saving → {OUTPUT_EXCEL}")
     wb.save(OUTPUT_EXCEL)
     print("[done] ✅  Reordered workbook saved.\n")
+    end_time = datetime.now()
 
-
-if __name__ == "__main__":
-    main()
+    elapsed = (end_time - start_time).total_seconds()
+    log_time(
+        f"Chunk Formation END | "
+        f"Duration={elapsed:.3f} sec"
+    )

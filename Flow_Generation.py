@@ -455,7 +455,7 @@ def expand_lineage_horizontal(
 
     # ---------- External / unresolved method ----------
     if orig_row is None:
-        display_cls = os.path.splitext(os.path.basename(classname))[0]
+        display_cls = classname
         ext_line_count = method_line_map.get(
             (classname.lower(), methodname.lower())
         )
@@ -473,7 +473,7 @@ def expand_lineage_horizontal(
     # FULL file path (no extension) from Cleaned_AST_Details. Try the
     # full-path key first (in case it ever matches), then fall back to
     # the basename key, which is what actually matches in practice.
-    display_cls = os.path.splitext(os.path.basename(classname))[0]
+    display_cls = classname
     line_count = method_line_map.get(
         (classname.lower(), methodname.lower())
     )
@@ -834,7 +834,7 @@ def generate_method_level_hierarchy(
             )
 
             # ---------- Force root visibility ----------
-            display_classname = os.path.splitext(os.path.basename(classname))[0]
+            display_classname = classname
             root_line_count = method_line_map.get(
                 (classname.lower(), methodname.lower())
             )

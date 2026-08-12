@@ -1,12 +1,3 @@
-if node["children"]:
-    trigger = node["filenames"][0] if node.get("filenames") else node_name
-    node_unique = node.get("unique_total_lines", node.get("total_lines", 0))
-    
-    # Only split into chunks if this subtree's total LOC exceeds the limit.
-    # If the whole subtree fits in one chunk, let the parent absorb it — 
-    # create_chunks_for_children at the parent level will inline everything.
-    if node_unique >= CHUNK_LIMIT:
-        create_chunks_for_children(
-            node["children"], level + 1, trigger, CHUNK_LIMIT,
-            root_file=root_file
-        )
+INPUT_PATH has values like C:\Downloads.method no_of_lines : value
+The problem is: chunk is not forming properly.
+I dont know how to say the issue. sometimes only top level chunks are forming, child level chunks are not formed. Sometimes some of the values from INPUT_PATH is missed in chunk EG: if the code_sum is less than chunk limit, some values form Input_path is missing in chunk if the code_sum is more than chunk limit top level chunks are formed but child is not formed

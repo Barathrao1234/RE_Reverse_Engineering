@@ -1,3 +1,5 @@
+from datetime import datetime
+
 import pandas as pd
 import html
 import itertools
@@ -7,7 +9,6 @@ import os
 import unicodedata
 from collections import defaultdict, deque, OrderedDict
 import numpy as np
-from datetime import datetime
 
 # ── Non-interactive config ────────────────────────────────────────────────────
 SHEET_NAME  = 0
@@ -60,7 +61,7 @@ NO_LINES_RE = re.compile(
     r'^(?P<method>.*?)\s+no_of_lines\s*:\s*(?P<lines>\d+|Nil|None)\s*$',
     re.IGNORECASE
 )
-METHOD_PATTERN = re.compile(r'.*[^.]+\.[^.\s]+')
+METHOD_PATTERN = re.compile(r'^[^.]+\.[^.]+')
 
 
 def is_method(name: str) -> bool:
@@ -284,10 +285,7 @@ def create_chunks_for_children(children, level, trigger_node, CHUNK_LIMIT,
         child_refs_in_current[:]  = []
 
     for child_name, child_node in ordered_children:
-        # FIXED: use child's full_entity as the chunked_subtrees key so the guard
-        # is consistent with create_parent_reference_chunk which also uses full_entity.
-        child_full = child_node["filenames"][0] if child_node.get("filenames") else child_name
-        if (trigger_node, child_full) in chunked_subtrees or (trigger_node, child_name) in chunked_subtrees:
+        if (trigger_node, child_name) in chunked_subtrees:
             continue
 
         child_unique_total = child_node.get(
@@ -296,9 +294,9 @@ def create_chunks_for_children(children, level, trigger_node, CHUNK_LIMIT,
 
         # ── LARGE child ──────────────────────────────────────────────────────
         if child_unique_total >= CHUNK_LIMIT:
-            child_refs_in_current.append(child_full)
+            child_refs_in_current.append(child_name)
             have_items = True
-            chunked_subtrees.add((trigger_node, child_full))
+            chunked_subtrees.add((trigger_node, child_name))
             continue
 
         # ── SMALL child: inline all its methods into the current bin ─────────
@@ -327,9 +325,9 @@ def create_chunks_for_children(children, level, trigger_node, CHUNK_LIMIT,
                     current_groups_set.add(g)
             current_unique_sum += incremental_unique
             have_items = True
-            child_refs_in_current.append(child_full)
-        # FIXED: no else -> chunked_subtrees; empty children are not marked as
-        # done so the parent reference pass can still recover their methods.
+            child_refs_in_current.append(child_name)
+        else:
+            chunked_subtrees.add((trigger_node, child_name))
 
     _flush_chunk()
 
@@ -355,18 +353,37 @@ def assign_chunks_top_down(node_name, node, level, CHUNK_LIMIT,
         )
 
     # ── Then chunk THIS node's children ──────────────────────────────────
-    # FIXED 1: no longer gated on total_unique >= CHUNK_LIMIT — always chunk.
-    # FIXED 2: pass full_entity (filenames[0]) as trigger_node, not raw node_name.
-    #   node_name is the bare segment key (e.g. "MyClass" in multi-column input)
-    #   which has no dot, so is_method() returns False and the trigger is never
-    #   inserted into methods_out inside _flush_chunk.
-    #   filenames[0] holds the fully-qualified token so is_method() passes correctly.
-    if node["children"]:
-        trigger = node["filenames"][0] if node.get("filenames") else node_name
+    total_unique = node.get(
+        "unique_total_lines", node.get("total_lines", node.get("lines", 0))
+    )
+    if total_unique >= CHUNK_LIMIT and node["children"]:
         create_chunks_for_children(
-            node["children"], level + 1, trigger, CHUNK_LIMIT,
+            node["children"], level + 1, node_name, CHUNK_LIMIT,
             root_file=root_file
         )
+    elif total_unique >= CHUNK_LIMIT and not node["children"]:
+        # ── FIX: oversized LEAF entity (no children of its own) ──────────
+        # A node whose own size alone reaches/exceeds CHUNK_LIMIT is treated
+        # as a "large child" by its parent's create_chunks_for_children —
+        # which does NOT inline it, but only records a pointer/reference to
+        # it, assuming a downstream chunk for this node will exist.
+        # But since this node has no children, create_chunks_for_children
+        # is never invoked for it (guarded by `node["children"]` above), so
+        # without this branch no chunk is EVER created that actually
+        # contains this node's own code — it becomes a dangling reference
+        # and its content silently disappears from every chunk.
+        if is_method(node_name) or is_group(node_name):
+            register_or_get_chunk_id(
+                filenames_ordered=[node_name] if is_method(node_name) else [],
+                code_sum=global_lines_by_name.get(node_name, 0),
+                row_indices_ordered=[node_name],
+                trigger_node=node_name,
+                level=level,
+                trigger_node_name=node_name,
+                child_chunk_refs="",
+                chunk_type="leaf",
+                groups_ordered=[node_name] if is_group(node_name) else [],
+            )
 
 
 def create_parent_reference_chunk(node_name, node, level):
@@ -377,20 +394,19 @@ def create_parent_reference_chunk(node_name, node, level):
     seen_g = set()
     child_refs = []
 
-    # FIXED: use full_entity (filenames[0]) instead of node_name so that
-    # is_method() passes for multi-column input where node_name has no dot.
-    full_trigger = node["filenames"][0] if node.get("filenames") else node_name
-    if is_method(full_trigger) and full_trigger not in seen_m:
-        parent_methods_list.append(full_trigger)
-        seen_m.add(full_trigger)
-    elif is_group(full_trigger) and full_trigger not in seen_g:
-        parent_groups_list.append(full_trigger)
-        seen_g.add(full_trigger)
+    # FIX: include the level_1 method (node_name) itself in the parent_ref chunk
+    # so that when this chunk is used to extract code, the root method is also
+    # part of the input spec.
+    if is_method(node_name) and node_name not in seen_m:
+        parent_methods_list.append(node_name)
+        seen_m.add(node_name)
+    elif is_group(node_name) and node_name not in seen_g:
+        parent_groups_list.append(node_name)
+        seen_g.add(node_name)
 
     for child_name, child_node in node["children"].items():
-        child_trigger = child_node["filenames"][0] if child_node.get("filenames") else child_name
-        if (full_trigger, child_trigger) in chunked_subtrees or (node_name, child_name) in chunked_subtrees:
-            child_refs.append(child_trigger)
+        if (node_name, child_name) in chunked_subtrees:
+            child_refs.append(child_name)
         else:
             for ent in iter_entities_dfs(child_node):
                 if is_method(ent) and ent not in seen_m:
@@ -406,9 +422,9 @@ def create_parent_reference_chunk(node_name, node, level):
             filenames_ordered=parent_methods_list,
             code_sum=unique_sum,
             row_indices_ordered=parent_methods_list,
-            trigger_node=full_trigger,
+            trigger_node=node_name,
             level=level,
-            trigger_node_name=f"{full_trigger}_PARENT_ONLY",
+            trigger_node_name=f"{node_name}_PARENT_ONLY",
             child_chunk_refs=", ".join(child_refs),
             chunk_type="parent_ref",
             groups_ordered=parent_groups_list,
@@ -418,11 +434,8 @@ def create_parent_reference_chunk(node_name, node, level):
 def compute_totals(node_name, node):
     total_structural = node["lines"]
     unique_methods   = set()
-    # FIXED: use the full_entity stored in filenames (not the raw node_name key)
-    # so that global_lines_by_name lookups resolve correctly for full-path tokens.
-    for fname in node.get("filenames", []):
-        if is_method(fname):
-            unique_methods.add(fname)
+    if is_method(node_name):
+        unique_methods.add(node_name)
     for child_name, child_node in node["children"].items():
         child_structural = compute_totals(child_name, child_node)
         total_structural += child_structural
@@ -458,46 +471,21 @@ def build_tree(df: pd.DataFrame):
         for arrow in ["->", "=> ", "→", " - > "]:
             s = s.replace(arrow, " -> ")
         segments = [seg.strip() for seg in re.split(r'\s*->\s*', s) if seg.strip()]
-        # Build accumulated full path so leaf key == "full_path.method"
-        accumulated_segments = []
         for seg in segments:
             name, lines, _ = extract_name_lines(seg)
             if name:
-                accumulated_segments.append(name)
-                # Use the last two parts joined by "." as the node key when the
-                # final segment already contains a dot (i.e. is a method token).
-                # For intermediate path segments (no dot), use the name itself.
-                # The full identity stored in filenames is the raw name as parsed.
-                node_key = name  # tree key stays as the parsed segment name
-                if node_key not in current:
-                    current[node_key] = {"lines": lines, "children": OrderedDict(),
-                                         "rows": set(), "filenames": [name]}
-                current[node_key]["lines"] = max(current[node_key]["lines"], lines)
-                current[node_key]["rows"].add(idx)
-                # Store full accumulated path for leaf method nodes so that
-                # iter_entities_dfs returns the complete "full_path.method" token.
-                # If the segment itself already contains a dot it IS the full token
-                # (e.g. "MyClass.myMethod" or "C:\path\MyClass.method") — use as-is.
-                # Otherwise join the accumulated path with dots.
-                if "." in name:
-                    full_entity = name          # already the full qualified token
-                elif len(accumulated_segments) > 1:
-                    full_entity = ".".join(accumulated_segments)
-                else:
-                    full_entity = name
-                if full_entity not in current[node_key]["filenames"]:
-                    current[node_key]["filenames"] = [full_entity]
-                global_lines_by_name[full_entity] = max(
-                    global_lines_by_name.get(full_entity, 0),
+                if name not in current:
+                    current[name] = {"lines": lines, "children": OrderedDict(),
+                                     "rows": set(), "filenames": [name]}
+                current[name]["lines"] = max(current[name]["lines"], lines)
+                current[name]["rows"].add(idx)
+                if name not in current[name]["filenames"]:
+                    current[name]["filenames"].append(name)
+                global_lines_by_name[name] = max(
+                    global_lines_by_name.get(name, 0),
                     lines if not is_group(name) else 0
                 )
-                # Also keep bare name mapped for fallback lookups
-                if name != full_entity:
-                    global_lines_by_name[name] = max(
-                        global_lines_by_name.get(name, 0),
-                        lines if not is_group(name) else 0
-                    )
-                current = current[node_key]["children"]
+                current = current[name]["children"]
     return tree
 
 
@@ -1179,12 +1167,4 @@ def chunks_formation(INPUT_PATH, program_or_process="program"):
         hierarchy_df.to_excel(writer,           sheet_name="Hierarchy_JSON",       index=False)
 
     print(f"\n[DONE] Exported to: {OUT_XLSX}")
-
-    end_time = datetime.now()
-
-    elapsed = (end_time - start_time).total_seconds()
-    log_time(
-        f"Chunk Formation END | "
-        f"Duration={elapsed:.3f} sec"
-    )
     return OUT_XLSX,program_or_process,CHUNK_LIMIT

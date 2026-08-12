@@ -454,33 +454,23 @@ def expand_lineage_horizontal(
     # ──────────────────────────────────────────────────────────────────────────
 
     # ---------- External / unresolved method ----------
+    # Display label uses the full path (classname from Cleaned_AST_Details).
+    # Line-count lookup uses only the short class name (basename, no ext)
+    # because method_line_map is keyed that way (Methods sheet has no paths).
+    display_cls = classname
+    short_cls = os.path.splitext(os.path.basename(classname))[0]
+
     if orig_row is None:
-        display_cls = classname
         ext_line_count = method_line_map.get(
-            (classname.lower(), methodname.lower())
+            (short_cls.lower(), methodname.lower()), 0
         )
-        if ext_line_count is None:
-            ext_line_count = method_line_map.get(
-                (display_cls.lower(), methodname.lower()), 0
-            )
         external_node = f"{display_cls}.{methodname} no_of_lines : {ext_line_count}"
         return [[external_node]]
 
     # ---------- Build node ----------
-    # method_line_map keys come from the Methods sheet's class_method_key
-    # column, which stores the SHORT class name (no path) — e.g.
-    # "AbstractPageRequest.getPageSize" — while `classname` here is the
-    # FULL file path (no extension) from Cleaned_AST_Details. Try the
-    # full-path key first (in case it ever matches), then fall back to
-    # the basename key, which is what actually matches in practice.
-    display_cls = classname
     line_count = method_line_map.get(
-        (classname.lower(), methodname.lower())
+        (short_cls.lower(), methodname.lower()), 0
     )
-    if line_count is None:
-        line_count = method_line_map.get(
-            (display_cls.lower(), methodname.lower()), 0
-        )
     node_name = f"{display_cls}.{methodname} no_of_lines : {line_count}"
 
     # Max depth guard
@@ -645,6 +635,20 @@ def write_all_sheets_pandas(METHOD_FLOW_OCCURRENCE_DISTRIBUTION_EXCEL, df_levels
     logging.info(f"Excel saved to {METHOD_FLOW_OCCURRENCE_DISTRIBUTION_EXCEL} with merged cells for repeated values (order preserved)")
 
 def load_method_line_counts_from_excel(excel_path, sheet_name="Methods"):
+    """
+    Build method_line_map keyed by (short_classname.lower(), methodname.lower()).
+
+    WHY short class name only:
+    - Methods sheet class_method_key = "ShortClass.methodName"  (no path)
+    - Methods sheet file_path base dir differs from Cleaned_AST_Details base dir
+      so full-path keys from the two sheets can never match.
+    - The short class name (basename, no extension) IS consistent across both
+      sheets, so it is the only reliable join key.
+
+    The full path used as the display label in node names comes from
+    Cleaned_AST_Details (class_interface_name) and is looked up separately
+    in expand_lineage_horizontal via a basename-derived key.
+    """
     df_methods = pd.read_excel(excel_path, sheet_name=sheet_name, engine="openpyxl")
     df_methods = df_methods.fillna("")
 
@@ -657,14 +661,17 @@ def load_method_line_counts_from_excel(excel_path, sheet_name="Methods"):
         if "." not in class_method:
             continue
 
-        # class_method_key format: "full_path_without_ext.methodname"
-        # Use rsplit so the method is always the last segment
-        path_part, methodname = class_method.rsplit(".", 1) 
-        classname = path_part # ← keep full path, not just basename 
-        try: 
-            method_line_map[(classname.lower(), methodname.lower())] = int(line_count) if line_count not in (None, "", "nan") and str(line_count).strip() not in ("", "nan", "None") else None 
-        except (ValueError, TypeError): 
-            method_line_map[(classname.lower(), methodname.lower())] = None
+        # class_method_key = "ShortClassName.methodName"
+        short_class, methodname = class_method.rsplit(".", 1)
+        key = (short_class.lower(), methodname.lower())
+
+        try:
+            lc = int(line_count) if str(line_count).strip() not in ("", "nan", "None") else None
+        except (ValueError, TypeError):
+            lc = None
+
+        method_line_map[key] = lc
+
     return method_line_map
 
 def filter_zero_line_cells(METHOD_FLOW_OCCURRENCE_DISTRIBUTION_EXCEL):
@@ -835,12 +842,9 @@ def generate_method_level_hierarchy(
 
             # ---------- Force root visibility ----------
             display_classname = classname
+            short_classname = os.path.splitext(os.path.basename(classname))[0]
             root_line_count = method_line_map.get(
-                (classname.lower(), methodname.lower())
-            )
-            if root_line_count is None:
-                root_line_count = method_line_map.get(
-                    (display_classname.lower(), methodname.lower()), 0
+                (short_classname.lower(), methodname.lower()), 0
                 )
             root_node = f"{display_classname}.{methodname} no_of_lines : {root_line_count}"
 

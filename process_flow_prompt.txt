@@ -1,0 +1,117 @@
+4.2 Main Process Flow
+
+Analyze all provided class.method implementations (each delimited by BEGIN METHOD / END METHOD markers) and produce a complete, forward-engineering-ready process flow by following these rules:
+
+─────────────────────────────────────────
+A. TRAVERSAL RULES
+─────────────────────────────────────────
+1. Begin from the entry-point method (the topmost caller or the method
+   explicitly identified as the starting point).
+
+2. For every user-defined method call encountered:
+   a. Immediately descend into its implementation if it is provided
+      between BEGIN METHOD / END METHOD.
+   b. Expand its logic in-place — do not summarize it as a black box.
+   c. Continue recursively until you reach leaf-level operations
+      (SDK calls, DB queries, I/O, third-party APIs, built-ins).
+
+3. For any user-defined method call whose implementation is NOT provided:
+   — Describe the step's inferred business purpose from call context,
+     parameter names, and return value usage, then append exactly:
+     "⚠ Full business logic unavailable — implementation not provided."
+
+4. Do NOT flatten or skip intermediate methods. Every layer of the call
+   chain must appear as a nested sub-step under its caller.
+
+─────────────────────────────────────────
+B. STEP FORMAT (use for every step and sub-step)
+─────────────────────────────────────────
+Number steps hierarchically (1, 1.1, 1.1.1 …).
+
+For each step include ALL of the following that are present in the code:
+
+  • Class.Method  — fully-qualified name where the logic lives
+  • Trigger       — what causes this step (call site, event, condition)
+  • Inputs        — every parameter/variable passed in, with its
+                    exact name and value or value-expression as
+                    written in the code (e.g., retryLimit = 3,
+                    status = order.status, flag = isActive ?? false)
+  • Pre-condition — any guard clause, if-check, or validation that
+                    must pass before the core logic runs; quote the
+                    exact condition expression
+  • Core Logic    — what the step does, expressed in plain business
+                    language but referencing exact variable names,
+                    field names, literal values, and formulas from
+                    the source (e.g., "Calculates discountedPrice =
+                    basePrice * (1 - discountRate) where discountRate
+                    defaults to 0.10 if not supplied")
+  • Branching     — every if / else-if / else / switch branch:
+                    - Quote the exact condition expression
+                    - Describe the action taken in each branch
+                    - Show the resulting value or state change
+  • Loops         — for each loop: iteration variable, collection or
+                    range, exact exit/continue condition, and what
+                    accumulates or mutates per iteration
+  • Outputs       — exact return value, updated object fields, or
+                    side effects (DB write, event emitted, etc.)
+  • Post-condition / next step — what is called or triggered next,
+                    and under what condition
+  • Error handling — exceptions caught or thrown, fallback values,
+                    retry logic with exact counts/delays
+
+─────────────────────────────────────────
+C. SPECIAL ELEMENTS — surface explicitly
+─────────────────────────────────────────
+- Hardcoded literals & magic numbers — quote value and explain
+  business meaning (e.g., timeout = 30000 ms → 30-second API timeout)
+- Configuration / constants — name, source (config file / env var /
+  inline), and how they influence behavior
+- Shared / mutated state — any variable or object modified across
+  multiple steps; flag it with: "⚡ Shared state mutated here"
+- Asynchronous operations — mark with [ASYNC], note what is awaited
+  and what happens on resolution vs. rejection
+- External calls — HTTP endpoints, DB table/query, message queue,
+  file path — include exact values where present in the code
+- Data transformations — input shape → transformation applied →
+  output shape, with field-level detail
+
+─────────────────────────────────────────
+D. OUTPUT STRUCTURE
+─────────────────────────────────────────
+Produce the following sections in order:
+
+  [0] ENTRY POINT SUMMARY
+      One paragraph: what triggers the entire flow, what it
+      ultimately produces, and the top-level class.method.
+
+  [1] CALL TREE (collapsed)
+      Indented list showing the full method call hierarchy so the
+      reader can navigate the detailed steps below.
+
+  [2] DETAILED STEP-BY-STEP PROCESS FLOW
+      Full hierarchical numbered steps per Section B above.
+
+  [3] DATA FLOW SUMMARY
+      A compact table:
+        Step # | Input variables | Transformation | Output / side-effect
+
+  [4] BRANCHING & DECISION SUMMARY
+      List every decision point: Step #, condition expression,
+      branch-true outcome, branch-false outcome.
+
+  [5] ASSUMPTIONS & GAPS
+      List every inferred business rule (where code was absent or
+      ambiguous) and every ⚠ unavailable implementation, so a
+      developer knows what must be clarified before regenerating code.
+
+─────────────────────────────────────────
+E. QUALITY BARS
+─────────────────────────────────────────
+- The output must be detailed enough that a developer who has never
+  seen the original source can re-implement every method exactly,
+  including all literal values, conditions, and side effects.
+- Never paraphrase away a specific value, variable name, or condition.
+- Never merge sibling branches into "handles various cases" —
+  enumerate each branch individually.
+- Preserve the original execution order; do not reorder for narrative
+  convenience.

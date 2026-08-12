@@ -335,12 +335,24 @@ def read_ast_and_build_graph(excel_path, sheet_name="Cleaned_AST_Details"):
     filebase_to_nodes = defaultdict(list)
 
     for _, r in df_orig.iterrows():
-        filebase = os.path.splitext(r["filename"])[0]
+        # Use classname (full path, no ext) as the stable key — it's what
+        # class_method_call full-path entries and classname lookups use.
+        filebase = r["classname"]   # already has no extension in Cleaned_AST_Details
         node = f"{filebase}.{r['methodname']}"
         method_to_nodes[r["methodname"]].append(node)
         filebase_to_nodes[filebase].append(node)
         if node not in graph:
             graph[node] = []
+
+    # Build a basename → full classname map so short-name cm_calls like
+    # "ConstraintViolations" can be resolved to the full-path classname.
+    # Cross-platform: use ntpath to split Windows backslash paths on any OS.
+    import ntpath as _ntpath
+    basename_to_classnames = defaultdict(list)
+    for cn in df_orig["classname"].unique():
+        bn = _ntpath.splitext(_ntpath.basename(cn))[0] or os.path.splitext(os.path.basename(cn))[0]
+        if bn:
+            basename_to_classnames[bn.lower()].append(cn)
 
     for _, r in df_orig.iterrows():
         caller = f"{os.path.splitext(r['filename'])[0]}.{r['methodname']}"
@@ -350,11 +362,37 @@ def read_ast_and_build_graph(excel_path, sheet_name="Cleaned_AST_Details"):
         callee = raw.split("(")[0].strip()
         targets = []
         if "." in callee:
+            # Already a full "path_or_class.method" reference — use directly.
             targets.append(callee)
         else:
-            targets.extend(method_to_nodes.get(callee, []))
+            # Short name — could be a class name or a bare method name.
+            # 1) Try it as a class basename: find all matching classnames in AST
+            #    and look up their methods in method_to_nodes.
+            matched_classes = basename_to_classnames.get(callee.lower(), [])
+            for full_cn in matched_classes:
+                # Add all nodes for this class (every method in that class)
+                # so they appear in the graph and can be traversed.
+                nodes_for_class = [
+                    n for n in method_to_nodes.get(r["methodname"], [])
+                    if n.startswith(full_cn)
+                ]
+                # Broader: add all nodes whose classname matches
+                for mn, nodes in method_to_nodes.items():
+                    for n in nodes:
+                        # n = "filebase.methodname" — match by classname prefix
+                        pass  # handled below via filebase_to_nodes
+                # Use filebase_to_nodes keyed by full classname (no ext)
+                class_nodes = filebase_to_nodes.get(full_cn, [])
+                targets.extend(class_nodes)
+
+            # 2) Try it as a bare method name across all classes
+            if not targets:
+                targets.extend(method_to_nodes.get(callee, []))
+
+        # 3) If still unresolved, keep as a leaf node so it at least appears
         if not targets:
             targets.append(callee)
+
         for t in targets:
             if t not in graph:
                 graph[t] = []
@@ -362,6 +400,10 @@ def read_ast_and_build_graph(excel_path, sheet_name="Cleaned_AST_Details"):
 
     for k in graph:
         graph[k] = list(dict.fromkeys(graph[k]))
+
+    # Deduplicate filebase_to_nodes (multiple AST rows per method create duplicates)
+    filebase_to_nodes = {k: list(dict.fromkeys(v)) for k, v in filebase_to_nodes.items()}
+    method_to_nodes   = {k: list(dict.fromkeys(v)) for k, v in method_to_nodes.items()}
 
     method_to_row = {}
     for _, row in df_orig.iterrows():

@@ -383,10 +383,11 @@ def assign_chunks_top_down(node_name, node, level, CHUNK_LIMIT,
         )
 
     # ── Then chunk THIS node's children ──────────────────────────────────
-    total_unique = node.get(
-        "unique_total_lines", node.get("total_lines", node.get("lines", 0))
-    )
-    if total_unique >= CHUNK_LIMIT and node["children"]:
+    # NOTE: Do NOT guard with total_unique >= CHUNK_LIMIT here.
+    # The CHUNK_LIMIT split logic already lives inside create_chunks_for_children.
+    # When total < CHUNK_LIMIT, all methods simply fit in one chunk (no flush).
+    # The outer guard was preventing chunking entirely when CHUNK_LIMIT > subtree size.
+    if node["children"]:
         create_chunks_for_children(
             node["children"], level + 1, node_name, CHUNK_LIMIT,
             root_file=root_file

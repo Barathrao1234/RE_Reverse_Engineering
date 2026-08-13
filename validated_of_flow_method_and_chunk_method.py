@@ -46,18 +46,12 @@ def extract_entities_from_json(json_path, group_key="entry_point"):
     if group_key in groups and isinstance(groups[group_key], dict):
         files = groups[group_key].get("files", []) or []
         for fpath in files:
-            try:
-                entities.append(Path(fpath).stem)
-            except Exception:
-                entities.append(str(fpath).split(".")[0])
+            entities.append(str(Path(fpath).with_suffix("")))
     else:
         for grp in groups.values():
             files = (grp or {}).get("files", []) or []
             for fpath in files:
-                try:
-                    entities.append(Path(fpath).stem)
-                except Exception:
-                    entities.append(str(fpath).split(".")[0])
+                entities.append(str(Path(fpath).with_suffix("")))
 
     seen = set()
     unique_entities = []

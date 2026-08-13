@@ -398,15 +398,26 @@ def assign_chunks_top_down(node_name, node, level, CHUNK_LIMIT,
 
 def create_parent_reference_chunk(node_name, node, level):
     global chunked_subtrees
+
+    # ── RECURSE FIRST into children that themselves may have had splits ──────
+    for child_name, child_node in node["children"].items():
+        create_parent_reference_chunk(child_name, child_node, level + 1)
+
+    # ── Only create a parent_ref if this node had ANY children chunked ───────
+    has_chunked_child = any(
+        (node_name, child_name) in chunked_subtrees
+        for child_name in node["children"]
+    )
+    if not has_chunked_child:
+        return  # nothing to reference; no parent_ref needed for this node
+
     parent_methods_list = []
     parent_groups_list  = []
     seen_m = set()
     seen_g = set()
     child_refs = []
 
-    # FIX: include the level_1 method (node_name) itself in the parent_ref chunk
-    # so that when this chunk is used to extract code, the root method is also
-    # part of the input spec.
+    # Include the node itself (trigger method) in its own parent_ref chunk
     if is_method(node_name) and node_name not in seen_m:
         parent_methods_list.append(node_name)
         seen_m.add(node_name)
@@ -427,7 +438,10 @@ def create_parent_reference_chunk(node_name, node, level):
                     seen_g.add(ent)
 
     if parent_methods_list:
-        unique_sum = sum(global_lines_by_name.get(fn, 0) for fn in parent_methods_list if is_method(fn))
+        unique_sum = sum(
+            global_lines_by_name.get(fn, 0)
+            for fn in parent_methods_list if is_method(fn)
+        )
         register_or_get_chunk_id(
             filenames_ordered=parent_methods_list,
             code_sum=unique_sum,
@@ -439,7 +453,6 @@ def create_parent_reference_chunk(node_name, node, level):
             chunk_type="parent_ref",
             groups_ordered=parent_groups_list,
         )
-
 
 def compute_totals(node_name, node):
     total_structural = node["lines"]

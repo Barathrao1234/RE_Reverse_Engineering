@@ -1,6 +1,3 @@
-
-
-
 import pandas as pd
 import html
 import itertools
@@ -1161,9 +1158,11 @@ def chunks_formation(INPUT_PATH, program_or_process="program"):
             chunks_df["parent_node"] = "Chunk under " + chunks_df.get("trigger_node", "")
         chunks_df["parent_entity"] = chunks_df["parent_node"].str.replace(
             "Chunk under ", "", regex=False)
-
-    map_df = chunks_df[["chunk_id", "parent_entity", "level", "code_sum",
-                         "methods_in_chunk", "groups"]].copy()
+        map_df = chunks_df[["chunk_id", "parent_entity", "level", "code_sum",
+                             "methods_in_chunk", "groups"]].copy()
+    else:
+        map_df = pd.DataFrame(columns=["chunk_id", "parent_entity", "level",
+                                        "code_sum", "methods_in_chunk", "groups"])
     map_df = map_df.sort_values(by=["parent_entity", "level", "code_sum"],
                                 ascending=[True, True, False])
 

@@ -1,4 +1,3 @@
-
 import os
 import re
 import html
@@ -2942,6 +2941,34 @@ def method_lineage(
                 member_name = member_name.split("(")[0].strip()
 
             if cls_name and cls_name[0].isupper():
+                # FIX: When multiple source files declare a class with the same simple
+                # name (e.g. two SearchOptions — one in generated-sources under
+                # nl.rabobank.schemas...req and one in the domain layer), the call
+                # string only contains the simple name 'SearchOptions'.
+                # To break the tie, look up the caller's var_map: if the variable that
+                # produced this call was declared with a package-qualified type like
+                # nl.rabobank.schemas...SearchOptions, the FQN is stored in var_map.
+                # If we can find a FQN for this simple class name from the caller
+                # source, prefer _resolve_fqn_path (exact FQN lookup) over the
+                # ambiguous simple-name lookup in _resolve_class_path.
+                _caller_norm_uc = os.path.normcase(os.path.abspath(caller_file)) if caller_file else ""
+                caller_text_uc = _fc_lower.get(_caller_norm_uc, "") or file_content_cache.get(caller_file, "")
+                _vmap_uc = _caller_varmap_cache.get(_caller_norm_uc)
+                if _vmap_uc is None:
+                    _vmap_uc = _build_var_map(caller_text_uc or "")
+                    _caller_varmap_cache[_caller_norm_uc] = _vmap_uc
+                # Search var_map for any variable whose type FQN ends in this simple class name
+                _fqn_hint = None
+                for _v_type in _vmap_uc.values():
+                    if (isinstance(_v_type, str)
+                            and _v_type[0].islower()         # package-qualified FQN
+                            and _v_type.split('.')[-1] == cls_name):
+                        _fqn_hint = _v_type
+                        break
+                if _fqn_hint:
+                    _fqn_resolved = _resolve_fqn_path(_fqn_hint, caller_file, member_name=member_name)
+                    if _fqn_resolved:
+                        return "{}.{}".format(_strip_extension(_fqn_resolved), rest)
                 resolved = _resolve_class_path(cls_name, caller_file, member_name=member_name)
                 return "{}.{}".format(_strip_extension(resolved), rest) if resolved else call_str
 

@@ -1,0 +1,100 @@
+For Full Source without any chunks
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PIPELINE EXECUTION INSTRUCTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You are currently operating in: MODE 3 (MASTER / SINGLE-SHOT).
+
+Target full source code:
+#TargetComponent.java
+
+No child Behavioral Contracts are supplied. The attached source represents the complete analytical scope.
+
+Execute MODE 3 exactly as defined in V22.
+
+Analyze the complete target source directly. You MUST produce the COMPLETE FINAL FUNCTIONAL SPECIFICATION.
+
+Generate Sections 1-12.
+Generate Appendices A-C using the exact 11-column non-negotiable contract.
+Generate the Completeness Signature.
+
+Perform the final internal verification defined in V22 before returning the completed specification.
+
+
+For Chunks handling
+
+[PASTE V22 PROMPT HERE]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PIPELINE EXECUTION INSTRUCTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+You are currently operating in: MODE 1 (LEAF / CHILD).
+
+Target Leaf source code:
+#LeafComponent.java
+
+Execute MODE 1 exactly as defined in V22.
+
+Analyze the supplied source and produce the structured CHILD BEHAVIORAL CONTRACT 
+using the exact Behavioral Contract Schema defined in V22.
+
+Do NOT generate the 12-section Functional Specification.
+Do NOT generate Appendices A-C.
+Do NOT generate the Completeness Signature.
+
+
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PIPELINE EXECUTION INSTRUCTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+You are currently operating in: MODE 2 (PARENT / INTERMEDIATE).
+
+Target Parent source code:
+#ParentComponent.java
+
+Relevant direct-child Behavioral Contracts:
+#ChildA_Contract.md
+#ChildB_Contract.md
+
+Execute MODE 2 exactly as defined in V22.
+
+Reconcile the target Parent source against the supplied direct-child
+Behavioral Contracts. Produce the structured PARENT BEHAVIORAL CONTRACT
+using the exact Behavioral Contract Schema defined in V22.
+
+Do NOT generate the 12-section Functional Specification.
+Do NOT generate Appendices A-C.
+Do NOT generate the Completeness Signature.
+
+
+
+[PASTE V22 PROMPT HERE]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+PIPELINE EXECUTION INSTRUCTION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+You are currently operating in: MODE 3 (MASTER).
+
+Target Master source code:
+#MasterComponent.java
+
+Relevant direct-child Behavioral Contracts:
+#ParentA_Contract.md
+#ParentB_Contract.md
+
+Execute MODE 3 exactly as defined in V22.
+
+Reconcile the target Master source against the supplied direct-child
+Behavioral Contracts. Use the Caller-Relevant Contract of each child to
+incorporate its transitive behavioral effects where applicable.
+
+You MUST now produce the COMPLETE FINAL FUNCTIONAL SPECIFICATION.
+
+Generate Sections 1-12.
+Generate Appendices A-C using the exact 11-column non-negotiable contract.
+Generate the Completeness Signature.
+
+Perform the final internal verification defined in V22 before returning the
+completed specification.
